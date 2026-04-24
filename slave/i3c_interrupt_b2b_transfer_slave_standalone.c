@@ -1,5 +1,5 @@
 /*
- * Local standalone override for experiment 02 slave.
+ * Shared standalone slave wrapper for experiments 02 and 03.
  */
 
 #include <stddef.h>
@@ -10,7 +10,7 @@ void *experiment_memset(void *ptr, int value, size_t num);
 #define EXPERIMENT_SLAVE_ECHO_COUNT_PLUS_ONE 1
 #define memset experiment_memset
 
-#include "../../common/i3c_interrupt_b2b_transfer_slave_base.c"
+#include "../common/i3c_interrupt_b2b_transfer_slave_base.c"
 
 #undef memset
 

@@ -17,11 +17,11 @@ else
 fi
 
 EXPERIMENT_NAME=$(basename "$EXPERIMENT_DIR")
-LOCAL_MASTER_DIR="$EXPERIMENT_DIR/master"
-LOCAL_SLAVE_DIR="$EXPERIMENT_DIR/slave"
+LOCAL_MASTER_DIR="$EXPERIMENT_DIR"
+LOCAL_SLAVE_DIR="$REPO_DIR/slave"
 COMMON_DIR="$REPO_DIR/common"
 MASTER_SDK_DIR="$SDK_ROOT/$EXPERIMENT_NAME/evkmimxrt595_ezhb"
-SLAVE_SDK_DIR="$SDK_ROOT/$EXPERIMENT_NAME/slave"
+SLAVE_SDK_DIR="$SDK_ROOT/slave"
 
 if [[ ! -d "$MASTER_SDK_DIR" || ! -d "$SLAVE_SDK_DIR" ]]; then
   echo "standalone SDK payload missing for $EXPERIMENT_NAME under $SDK_ROOT" >&2
@@ -41,7 +41,7 @@ MASTER_PROBE=${RT595_MASTER_PROBE:-${RT595_PROBE:-PRASAQKQ}}
 SLAVE_PROBE=${RT595_SLAVE_PROBE:-GRA1CQLQ}
 EXIT_TIMEOUT=${RT595_EXIT_TIMEOUT:-20}
 SLAVE_READY_TIMEOUT=${RT595_SLAVE_READY_TIMEOUT:-20}
-SLAVE_READY_PATTERN=${RT595_SLAVE_READY_PATTERN:-'slave: waiting for master traffic|slave: armed'}
+SLAVE_READY_PATTERN=${RT595_SLAVE_READY_PATTERN:-'slave: waiting for master traff|slave: armed'}
 SLAVE_POST_MASTER_WAIT=${RT595_SLAVE_POST_MASTER_WAIT:-1}
 
 CPU_FLAGS=(
@@ -405,7 +405,7 @@ validate_master_output() {
   local output_file=$2
 
   case "$experiment_name" in
-    02_i3c_new|03_i3c_new_interrupt)
+    master_polling|master_interrupt)
       grep -q 'I3C master transfer successful in I3C SDR mode' "$output_file"
       ;;
     *)
