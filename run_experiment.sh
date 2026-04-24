@@ -8,8 +8,7 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR="$SCRIPT_DIR"
-TTS_ROOT=${TTS_ROOT:-$(cd "$REPO_DIR/.." && pwd)}
-ARCHIVE_EXPERIMENTS_DIR="$TTS_ROOT/archive_experiments"
+SDK_ROOT="$REPO_DIR/sdk"
 
 if [[ -d "$REPO_DIR/$1" ]]; then
   EXPERIMENT_DIR=$(cd "$REPO_DIR/$1" && pwd)
@@ -21,11 +20,11 @@ EXPERIMENT_NAME=$(basename "$EXPERIMENT_DIR")
 LOCAL_MASTER_DIR="$EXPERIMENT_DIR/master"
 LOCAL_SLAVE_DIR="$EXPERIMENT_DIR/slave"
 COMMON_DIR="$REPO_DIR/common"
-MASTER_SDK_DIR="$ARCHIVE_EXPERIMENTS_DIR/$EXPERIMENT_NAME/evkmimxrt595_ezhb"
-SLAVE_SDK_DIR="$ARCHIVE_EXPERIMENTS_DIR/$EXPERIMENT_NAME/slave"
+MASTER_SDK_DIR="$SDK_ROOT/$EXPERIMENT_NAME/evkmimxrt595_ezhb"
+SLAVE_SDK_DIR="$SDK_ROOT/$EXPERIMENT_NAME/slave"
 
 if [[ ! -d "$MASTER_SDK_DIR" || ! -d "$SLAVE_SDK_DIR" ]]; then
-  echo "archive experiment payload missing for $EXPERIMENT_NAME under $ARCHIVE_EXPERIMENTS_DIR" >&2
+  echo "standalone SDK payload missing for $EXPERIMENT_NAME under $SDK_ROOT" >&2
   exit 1
 fi
 
@@ -33,8 +32,8 @@ BUILD_DIR="$EXPERIMENT_DIR/_build"
 MASTER_BUILD_DIR="$BUILD_DIR/master"
 SLAVE_BUILD_DIR="$BUILD_DIR/slave"
 
-LINKSERVER=${LINKSERVER_BIN:-$TTS_ROOT/.local/linkserver/extracted/flatten_LinkServer_25.12.83.pkg/Payload/dist/LinkServer}
-TOOLCHAIN_ROOT=${RT595_TOOLCHAIN_ROOT:-$TTS_ROOT/.local/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi}
+LINKSERVER=${LINKSERVER_BIN:-$REPO_DIR/.local/linkserver/extracted/flatten_LinkServer_25.12.83.pkg/Payload/dist/LinkServer}
+TOOLCHAIN_ROOT=${RT595_TOOLCHAIN_ROOT:-$REPO_DIR/.local/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi}
 CC=${RT595_CC:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-gcc}
 OBJCOPY=${RT595_OBJCOPY:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-objcopy}
 DEVICE=${RT595_DEVICE:-MIMXRT595S:EVK-MIMXRT595}
@@ -419,9 +418,9 @@ validate_master_output() {
 if [[ -n "${RT595_MASTER_LINK_SCRIPT:-}" ]]; then
   MASTER_LINK_SCRIPT="$RT595_MASTER_LINK_SCRIPT"
 else
-  MASTER_LINK_SCRIPT="$TTS_ROOT/src/master/evkmimxrt595_ezhb_HelloRam.ld"
+  MASTER_LINK_SCRIPT="$REPO_DIR/linker/evkmimxrt595_ezhb_HelloRam.ld"
 fi
-SLAVE_LINK_SCRIPT="${RT595_SLAVE_LINK_SCRIPT:-$TTS_ROOT/src/master/evkmimxrt595_ezhb_Debug.ld}"
+SLAVE_LINK_SCRIPT="${RT595_SLAVE_LINK_SCRIPT:-$REPO_DIR/linker/evkmimxrt595_ezhb_Debug.ld}"
 
 echo "Building $EXPERIMENT_NAME master"
 compile_master "$MASTER_LINK_SCRIPT"
