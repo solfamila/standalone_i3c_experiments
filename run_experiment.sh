@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: $0 <experiment-dir>" >&2
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  run_experiment.sh <experiment-dir>
+  run_experiment.sh clean [experiment-dir]
+EOF
+}
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage
   exit 2
 fi
 
@@ -10,17 +18,68 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_DIR="$SCRIPT_DIR"
 SDK_ROOT="$REPO_DIR/sdk"
 
-if [[ -d "$REPO_DIR/$1" ]]; then
-  EXPERIMENT_DIR=$(cd "$REPO_DIR/$1" && pwd)
+resolve_experiment_dir() {
+  local experiment_arg=$1
+
+  if [[ -d "$REPO_DIR/$experiment_arg" ]]; then
+    cd "$REPO_DIR/$experiment_arg" && pwd
+  elif [[ -d "$experiment_arg" ]]; then
+    cd "$experiment_arg" && pwd
+  else
+    echo "unknown experiment directory: $experiment_arg" >&2
+    exit 1
+  fi
+}
+
+clean_build_outputs() {
+  local target=${1:-all}
+  local build_dir
+
+  remove_build_dir() {
+    local build_dir=$1
+
+    if [[ -d "$build_dir" ]]; then
+      echo "Removing $build_dir"
+      rm -rf "$build_dir"
+    fi
+  }
+
+  case "$target" in
+    all)
+      while IFS= read -r build_dir; do
+        remove_build_dir "$build_dir"
+      done < <(find "$REPO_DIR" -mindepth 2 -maxdepth 2 -type d -name _build | sort)
+      ;;
+    *)
+      remove_build_dir "$(resolve_experiment_dir "$target")/_build"
+      ;;
+  esac
+}
+
+MODE=run
+TARGET_ARG=$1
+if [[ $1 == clean ]]; then
+  MODE=clean
+  TARGET_ARG=${2:-all}
+fi
+
+if [[ $MODE == clean ]]; then
+  clean_build_outputs "$TARGET_ARG"
+  exit 0
+fi
+
+EXPERIMENT_DIR=$(resolve_experiment_dir "$TARGET_ARG")
+
+if [[ -d "$EXPERIMENT_DIR" ]]; then
+  :
 else
-  EXPERIMENT_DIR=$(cd "$1" && pwd)
+  echo "unknown experiment directory: $TARGET_ARG" >&2
+  exit 1
 fi
 
 EXPERIMENT_NAME=$(basename "$EXPERIMENT_DIR")
 LOCAL_MASTER_DIR="$EXPERIMENT_DIR"
-LOCAL_SLAVE_DIR="$REPO_DIR/slave"
-COMMON_DIR="$REPO_DIR/common"
-MASTER_SDK_DIR="$SDK_ROOT/$EXPERIMENT_NAME/evkmimxrt595_ezhb"
+MASTER_SDK_DIR="$SDK_ROOT/master/evkmimxrt595_ezhb"
 SLAVE_SDK_DIR="$SDK_ROOT/slave"
 
 if [[ ! -d "$MASTER_SDK_DIR" || ! -d "$SLAVE_SDK_DIR" ]]; then
@@ -163,6 +222,7 @@ compile_master() {
   local source_root="$MASTER_SDK_DIR/source"
   local master_app_source="$LOCAL_MASTER_DIR/ezh_test_standalone.c"
   local master_features_source="$LOCAL_MASTER_DIR/ezh_features_standalone.c"
+  local master_driver_source="$LOCAL_MASTER_DIR/fsl_i3c_smartdma.c"
   local src
   local rel
   local obj
@@ -178,7 +238,6 @@ compile_master() {
 
   includes=(
     "$LOCAL_MASTER_DIR"
-    "$COMMON_DIR"
     "$MASTER_SDK_DIR"
     "$MASTER_SDK_DIR/source"
     "$MASTER_SDK_DIR/flash_config"
@@ -205,6 +264,7 @@ compile_master() {
     "$MASTER_SDK_DIR/component/uart/fsl_adapter_usart.c"
     "$MASTER_SDK_DIR/device/system_MIMXRT595S_cm33.c"
     "$MASTER_SDK_DIR/flash_config/flash_config.c"
+    "$master_driver_source"
     "$master_features_source"
     "$master_app_source"
     "$MASTER_SDK_DIR/source/semihost_hardfault.c"
@@ -217,7 +277,7 @@ compile_master() {
 
   while IFS= read -r src; do
     sources+=("$src")
-  done < <(find "$MASTER_SDK_DIR/drivers" -maxdepth 1 -type f -name '*.c' | sort)
+  done < <(find "$MASTER_SDK_DIR/drivers" -maxdepth 1 -type f -name '*.c' ! -name 'fsl_i3c_smartdma.c' | sort)
 
   for src in "${sources[@]}"; do
     if [[ ! -f "$src" ]]; then
@@ -283,7 +343,7 @@ compile_master() {
 compile_slave() {
   local link_script=$1
   local link_dir
-  local slave_app_source="$LOCAL_SLAVE_DIR/i3c_interrupt_b2b_transfer_slave_standalone.c"
+  local slave_app_source="$SLAVE_SDK_DIR/i3c_interrupt_b2b_transfer_slave_standalone.c"
   local src
   local rel
   local obj
@@ -298,8 +358,6 @@ compile_slave() {
   link_dir=$(dirname "$link_script")
 
   includes=(
-    "$LOCAL_SLAVE_DIR"
-    "$COMMON_DIR"
     "$SLAVE_SDK_DIR"
     "$MASTER_SDK_DIR"
     "$MASTER_SDK_DIR/flash_config"
@@ -347,8 +405,6 @@ compile_slave() {
       rel="shared/${src#$MASTER_SDK_DIR/}"
     elif [[ $src == "$SLAVE_SDK_DIR"/* ]]; then
       rel="sdk/${src#$SLAVE_SDK_DIR/}"
-    elif [[ $src == "$LOCAL_SLAVE_DIR"/* ]]; then
-      rel="local/${src#$LOCAL_SLAVE_DIR/}"
     else
       rel=${src#$REPO_DIR/}
     fi
@@ -418,9 +474,9 @@ validate_master_output() {
 if [[ -n "${RT595_MASTER_LINK_SCRIPT:-}" ]]; then
   MASTER_LINK_SCRIPT="$RT595_MASTER_LINK_SCRIPT"
 else
-  MASTER_LINK_SCRIPT="$REPO_DIR/linker/evkmimxrt595_ezhb_HelloRam.ld"
+  MASTER_LINK_SCRIPT="$MASTER_SDK_DIR/evkmimxrt595_ezhb_HelloRam.ld"
 fi
-SLAVE_LINK_SCRIPT="${RT595_SLAVE_LINK_SCRIPT:-$REPO_DIR/linker/evkmimxrt595_ezhb_Debug.ld}"
+SLAVE_LINK_SCRIPT="${RT595_SLAVE_LINK_SCRIPT:-$SLAVE_SDK_DIR/evkmimxrt595_ezhb_Debug.ld}"
 
 echo "Building $EXPERIMENT_NAME master"
 compile_master "$MASTER_LINK_SCRIPT"
