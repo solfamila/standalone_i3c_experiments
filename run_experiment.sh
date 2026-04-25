@@ -464,6 +464,12 @@ validate_master_output() {
     master_polling|master_interrupt)
       grep -q 'I3C master transfer successful in I3C SDR mode' "$output_file"
       ;;
+    master_dma_irq_probe)
+      grep -q 'DMA0 IRQ to SmartDMA proof successful' "$output_file"
+      ;;
+    master_i3c_dma_irq_probe)
+      grep -q 'I3C DMA request to DMA0 IRQ to SmartDMA proof successful' "$output_file"
+      ;;
     *)
       echo "unknown experiment: $experiment_name" >&2
       return 1
