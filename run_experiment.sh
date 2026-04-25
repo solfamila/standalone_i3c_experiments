@@ -294,6 +294,7 @@ compile_master() {
   link_dir=$(dirname "$link_script")
 
   includes=(
+    "$REPO_DIR"
     "$LOCAL_MASTER_DIR"
     "$MASTER_SDK_DIR"
     "$MASTER_SDK_DIR/source"
@@ -415,6 +416,7 @@ compile_slave() {
   link_dir=$(dirname "$link_script")
 
   includes=(
+    "$REPO_DIR"
     "$SLAVE_SDK_DIR"
     "$MASTER_SDK_DIR"
     "$MASTER_SDK_DIR/flash_config"

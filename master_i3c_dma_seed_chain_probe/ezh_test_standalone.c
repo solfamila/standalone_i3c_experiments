@@ -14,13 +14,13 @@
 #include "fsl_debug_console.h"
 #include "fsl_device_registers.h"
 #include "fsl_i3c.h"
-#include "fsl_iopctl.h"
 #include "fsl_inputmux.h"
 #include "fsl_power.h"
 #include "fsl_reset.h"
 #include "fsl_smartdma.h"
 #include "app.h"
 #include "board.h"
+#include "experiment_led.h"
 
 #define I3C_DMA_SEED_CHAIN_LENGTH 8U
 #define I3C_DMA_SEED_CHAIN_TIMEOUT 100000000U
@@ -33,7 +33,8 @@
 #define I3C_DMA_SEED_CHAIN_I3C_OD_BAUDRATE EXAMPLE_I3C_OD_BAUDRATE
 #define I3C_DMA_SEED_CHAIN_I3C_PP_BAUDRATE 4000000U
 #define I3C_DMA_SEED_CHAIN_LED_TOGGLE_INTERVAL 250000U
-#define I3C_DMA_SEED_CHAIN_LED_SELF_TEST_PULSE_US 300000U
+#define I3C_DMA_SEED_CHAIN_LED_BOOT_PULSE_US 100000U
+#define I3C_DMA_SEED_CHAIN_LED_SUCCESS_PULSE_US 120000U
 #define I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_US 200000U
 #define I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT 2U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
@@ -156,122 +157,38 @@ static bool s_transfer_led_active = false;
 static uint32_t s_transfer_led_poll_count = 0U;
 static uint32_t s_transfer_led_toggle_count = 0U;
 
-static void master_led_red_on(void)
-{
-    LED_RED_ON();
-}
-
-static void master_led_red_off(void)
-{
-    LED_RED_OFF();
-}
-
-static void master_led_green_on(void)
-{
-    LED_GREEN_ON();
-}
-
-static void master_led_green_off(void)
-{
-    LED_GREEN_OFF();
-}
-
-static void master_led_blue_on(void)
-{
-    LED_BLUE_ON();
-}
-
-static void master_led_blue_off(void)
-{
-    LED_BLUE_OFF();
-}
-
-static void master_led_blue_toggle(void)
-{
-    LED_BLUE_TOGGLE();
-}
-
-static void master_led_all_off(void)
-{
-    master_led_red_off();
-    master_led_green_off();
-    master_led_blue_off();
-}
-
-static void configure_transfer_led_pins(void)
-{
-    const uint32_t led_pin_config = IOPCTL_FUNC0 | IOPCTL_PUPD_EN | IOPCTL_PULLUP_EN | IOPCTL_INBUF_EN;
-
-    CLOCK_EnableClock(kCLOCK_HsGpio0);
-    CLOCK_EnableClock(kCLOCK_HsGpio1);
-    CLOCK_EnableClock(kCLOCK_HsGpio3);
-
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_RED_GPIO_PORT, BOARD_LED_RED_GPIO_PIN, led_pin_config);
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_GREEN_GPIO_PORT, BOARD_LED_GREEN_GPIO_PIN, led_pin_config);
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_BLUE_GPIO_PORT, BOARD_LED_BLUE_GPIO_PIN, led_pin_config);
-}
-
-static void transfer_led_delay_us(uint32_t delay_us)
-{
-    SDK_DelayAtLeastUs(delay_us, SystemCoreClock);
-}
-
 static void run_boot_led_self_test(void)
 {
-    master_led_all_off();
-
-    master_led_red_on();
-    transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_SELF_TEST_PULSE_US);
-    master_led_red_off();
-    transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_SELF_TEST_PULSE_US);
-
-    master_led_green_on();
-    transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_SELF_TEST_PULSE_US);
-    master_led_green_off();
-    transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_SELF_TEST_PULSE_US);
+    EXP_LED_Blink(false, false, true, I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT,
+                  I3C_DMA_SEED_CHAIN_LED_BOOT_PULSE_US);
+    EXP_LED_Set(false, false, true);
 }
 
 static void ensure_visible_transfer_activity(void)
 {
-    uint32_t pulse_index;
-
     if (s_transfer_led_toggle_count != 0U)
     {
         return;
     }
 
-    master_led_red_off();
-    master_led_green_off();
-    for (pulse_index = 0U; pulse_index < I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT; pulse_index++)
-    {
-        master_led_blue_on();
-        transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_US);
-        master_led_blue_off();
-        transfer_led_delay_us(I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_US);
-    }
+    EXP_LED_Blink(false, false, true, I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT,
+                  I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_US);
 }
 
 static void init_transfer_led(void)
 {
-    configure_transfer_led_pins();
-    LED_RED_INIT(LOGIC_LED_OFF);
-    LED_GREEN_INIT(LOGIC_LED_OFF);
-    LED_BLUE_INIT(LOGIC_LED_OFF);
-    master_led_all_off();
+    EXP_LED_Init();
 }
 
 static void set_success_led(void)
 {
-    master_led_red_off();
-    master_led_green_off();
-    master_led_blue_on();
+    EXP_LED_Blink(false, true, false, 3U, I3C_DMA_SEED_CHAIN_LED_SUCCESS_PULSE_US);
+    EXP_LED_Set(false, true, false);
 }
 
 static void set_failure_led(void)
 {
-    master_led_green_off();
-    master_led_blue_off();
-    master_led_red_on();
+    EXP_LED_Set(true, false, false);
 }
 
 static void begin_transfer_led(void)
@@ -279,9 +196,7 @@ static void begin_transfer_led(void)
     s_transfer_led_active = true;
     s_transfer_led_poll_count = 0U;
     s_transfer_led_toggle_count = 0U;
-    master_led_red_off();
-    master_led_green_off();
-    master_led_blue_on();
+    EXP_LED_Set(false, false, true);
 }
 
 static void service_transfer_led(void)
@@ -299,16 +214,19 @@ static void service_transfer_led(void)
 
     s_transfer_led_poll_count = 0U;
     s_transfer_led_toggle_count++;
-    master_led_blue_toggle();
+    EXP_LED_ToggleBlue();
 }
 
-static void end_transfer_led(void)
+static void end_transfer_led(bool show_completion_pulse)
 {
     s_transfer_led_active = false;
-    ensure_visible_transfer_activity();
+    if (show_completion_pulse)
+    {
+        ensure_visible_transfer_activity();
+    }
     s_transfer_led_poll_count = 0U;
     s_transfer_led_toggle_count = 0U;
-    master_led_all_off();
+    EXP_LED_Set(false, false, false);
 }
 
 static void smartdma_completion_callback(void *param)
@@ -739,7 +657,7 @@ static status_t run_i3c_dma_seed_chain_probe(I3C_Type *base, uint8_t slaveAddr)
     result = I3C_MasterStop(base);
 
 exit:
-    end_transfer_led();
+    end_transfer_led(result == kStatus_Success);
 
     if (result != kStatus_Success)
     {

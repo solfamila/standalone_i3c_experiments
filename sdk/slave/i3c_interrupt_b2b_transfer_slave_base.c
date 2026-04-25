@@ -13,9 +13,9 @@
 #include "board.h"
 #include "fsl_debug_console.h"
 #include "fsl_i3c.h"
-#include "fsl_iopctl.h"
 #include "fsl_power.h"
 #include "fsl_reset.h"
+#include "experiment_led.h"
 
 #ifndef APP_ENABLE_SEMIHOST
 #define APP_ENABLE_SEMIHOST 1
@@ -167,65 +167,16 @@ static volatile bool g_slaveActivityLedCompletionPending = false;
 static volatile uint32_t g_slaveActivityLedPollCount = 0U;
 static volatile uint32_t g_slaveActivityLedToggleCount = 0U;
 
-static void slave_led_red_off(void)
-{
-    LED_RED_ON();
-}
-
-static void slave_led_green_off(void)
-{
-    LED_GREEN_ON();
-}
-
-static void slave_led_blue_on(void)
-{
-    LED_BLUE_OFF();
-}
-
-static void slave_led_blue_off(void)
-{
-    LED_BLUE_ON();
-}
-
-static void slave_led_blue_toggle(void)
-{
-    LED_BLUE_TOGGLE();
-}
-
-static void i3c_slave_configure_activity_led_pins(void)
-{
-    const uint32_t led_pin_config = IOPCTL_FUNC0 | IOPCTL_PUPD_EN | IOPCTL_PULLUP_EN | IOPCTL_INBUF_EN;
-
-    CLOCK_EnableClock(kCLOCK_HsGpio0);
-    CLOCK_EnableClock(kCLOCK_HsGpio1);
-    CLOCK_EnableClock(kCLOCK_HsGpio3);
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_RED_GPIO_PORT, BOARD_LED_RED_GPIO_PIN, led_pin_config);
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_GREEN_GPIO_PORT, BOARD_LED_GREEN_GPIO_PIN, led_pin_config);
-    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_BLUE_GPIO_PORT, BOARD_LED_BLUE_GPIO_PIN, led_pin_config);
-}
-
-static void i3c_slave_activity_led_delay_us(uint32_t delay_us)
-{
-    SDK_DelayAtLeastUs(delay_us, SystemCoreClock);
-}
-
 static void i3c_slave_init_activity_led(void)
 {
-    i3c_slave_configure_activity_led_pins();
-    LED_RED_INIT(LOGIC_LED_ON);
-    LED_GREEN_INIT(LOGIC_LED_ON);
-    LED_BLUE_INIT(LOGIC_LED_ON);
-    slave_led_red_off();
-    slave_led_green_off();
-    slave_led_blue_off();
+    EXP_LED_Init();
+    EXP_LED_Set(false, true, false);
 }
 
 static void i3c_slave_run_boot_led_self_test(void)
 {
-    slave_led_blue_on();
-    i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
-    slave_led_blue_off();
-    i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
+    EXP_LED_Blink(false, false, true, I3C_SLAVE_LED_VISIBLE_PULSE_COUNT, I3C_SLAVE_LED_VISIBLE_PULSE_US);
+    EXP_LED_Set(false, true, false);
 }
 
 static void i3c_slave_begin_activity_led(void)
@@ -234,13 +185,22 @@ static void i3c_slave_begin_activity_led(void)
     g_slaveActivityLedCompletionPending = false;
     g_slaveActivityLedPollCount = 0U;
     g_slaveActivityLedToggleCount = 0U;
-    slave_led_blue_on();
+    EXP_LED_Set(false, false, true);
 }
 
 static void i3c_slave_complete_activity_led(void)
 {
     g_slaveActivityLedActive = false;
     g_slaveActivityLedCompletionPending = true;
+}
+
+static void i3c_slave_fail_activity_led(void)
+{
+    g_slaveActivityLedActive = false;
+    g_slaveActivityLedCompletionPending = false;
+    g_slaveActivityLedPollCount = 0U;
+    g_slaveActivityLedToggleCount = 0U;
+    EXP_LED_Set(true, false, false);
 }
 
 static void i3c_slave_service_activity_led(void)
@@ -255,7 +215,7 @@ static void i3c_slave_service_activity_led(void)
 
         g_slaveActivityLedPollCount = 0U;
         g_slaveActivityLedToggleCount++;
-        slave_led_blue_toggle();
+        EXP_LED_ToggleBlue();
         return;
     }
 
@@ -264,18 +224,8 @@ static void i3c_slave_service_activity_led(void)
         return;
     }
 
-    if (g_slaveActivityLedToggleCount == 0U)
-    {
-        for (uint32_t pulseIndex = 0U; pulseIndex < I3C_SLAVE_LED_VISIBLE_PULSE_COUNT; pulseIndex++)
-        {
-            slave_led_blue_on();
-            i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
-            slave_led_blue_off();
-            i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
-        }
-    }
-
-    slave_led_blue_off();
+    EXP_LED_Blink(false, true, false, I3C_SLAVE_LED_VISIBLE_PULSE_COUNT, I3C_SLAVE_LED_VISIBLE_PULSE_US);
+    EXP_LED_Set(false, true, false);
     g_slaveActivityLedPollCount = 0U;
     g_slaveActivityLedToggleCount = 0U;
     g_slaveActivityLedCompletionPending = false;
@@ -505,6 +455,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             }
             else
             {
+                i3c_slave_fail_activity_led();
                 i3c_slave_record_trace(kSlaveTraceCompletionError, NULL, 0U, (uint32_t)xfer->completionStatus);
             }
             break;
