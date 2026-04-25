@@ -44,11 +44,11 @@ int main(void)
     EXP_LED_Init();
     smoke_log("LED smoke starting\n");
 
-    show_raw_levels(1U, 1U, 1U, 700000U, "raw 111: expected off");
-    show_raw_levels(0U, 1U, 1U, 700000U, "raw 011: expected red");
-    show_raw_levels(1U, 0U, 1U, 700000U, "raw 101: expected green");
-    show_raw_levels(1U, 1U, 0U, 700000U, "raw 110: expected blue");
-    show_raw_levels(0U, 0U, 0U, 700000U, "raw 000: expected white");
+    show_raw_levels(0U, 0U, 0U, 700000U, "raw 000: expected off");
+    show_raw_levels(1U, 0U, 0U, 700000U, "raw 100: expected red");
+    show_raw_levels(0U, 1U, 0U, 700000U, "raw 010: expected green");
+    show_raw_levels(0U, 0U, 1U, 700000U, "raw 001: expected blue");
+    show_raw_levels(1U, 1U, 1U, 700000U, "raw 111: expected white");
 
     smoke_log("logical final green\n");
     EXP_LED_Set(false, true, false);
