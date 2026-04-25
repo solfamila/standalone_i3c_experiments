@@ -144,6 +144,7 @@ static void i3c_master_callback(I3C_Type *base,
 #define EXPERIMENT_LED_BOOT_PULSE_US 100000U
 #define EXPERIMENT_LED_SUCCESS_PULSE_COUNT 3U
 #define EXPERIMENT_LED_SUCCESS_PULSE_US 120000U
+#define EXPERIMENT_LED_FINAL_HOLD_US 2000000U
 
 extern uint8_t __smartdma_start__[];
 extern uint8_t __smartdma_end__[];
@@ -169,15 +170,22 @@ static void init_status_led(void)
     EXP_LED_Set(false, false, true);
 }
 
+static void hold_status_led(void)
+{
+    SDK_DelayAtLeastUs(EXPERIMENT_LED_FINAL_HOLD_US, SystemCoreClock);
+}
+
 static void set_success_led(void)
 {
     EXP_LED_Blink(false, true, false, EXPERIMENT_LED_SUCCESS_PULSE_COUNT, EXPERIMENT_LED_SUCCESS_PULSE_US);
     EXP_LED_Set(false, true, false);
+    hold_status_led();
 }
 
 static void set_failure_led(void)
 {
     EXP_LED_Set(true, false, false);
+    hold_status_led();
 }
 
 #ifndef EXPERIMENT_USE_SMARTDMA

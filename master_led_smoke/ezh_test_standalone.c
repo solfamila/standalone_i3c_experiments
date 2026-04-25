@@ -28,12 +28,12 @@ static void smoke_log(const char *message)
     semihost_write0(message);
 }
 
-static void show_color(bool red, bool green, bool blue, uint32_t delay_us, const char *label)
+static void show_raw_levels(uint8_t red, uint8_t green, uint8_t blue, uint32_t delay_us, const char *label)
 {
-    char message[64];
+    char message[96];
 
-    EXP_LED_Set(red, green, blue);
-    (void)snprintf(message, sizeof(message), "master LED: %s\n", label);
+    EXP_LED_RawLevels(red, green, blue);
+    (void)snprintf(message, sizeof(message), "%s\n", label);
     smoke_log(message);
     SDK_DelayAtLeastUs(delay_us, SystemCoreClock);
 }
@@ -44,15 +44,15 @@ int main(void)
     EXP_LED_Init();
     smoke_log("LED smoke starting\n");
 
-    for (uint32_t cycle = 0U; cycle < 3U; cycle++)
-    {
-        show_color(true, false, false, 500000U, "red");
-        show_color(false, true, false, 500000U, "green");
-        show_color(false, false, true, 500000U, "blue");
-        show_color(false, false, false, 500000U, "off");
-    }
+    show_raw_levels(1U, 1U, 1U, 700000U, "raw 111: expected off");
+    show_raw_levels(0U, 1U, 1U, 700000U, "raw 011: expected red");
+    show_raw_levels(1U, 0U, 1U, 700000U, "raw 101: expected green");
+    show_raw_levels(1U, 1U, 0U, 700000U, "raw 110: expected blue");
+    show_raw_levels(0U, 0U, 0U, 700000U, "raw 000: expected white");
 
+    smoke_log("logical final green\n");
     EXP_LED_Set(false, true, false);
+    SDK_DelayAtLeastUs(2000000U, SystemCoreClock);
     smoke_log("LED smoke completed: steady green\n");
     return 0;
 }

@@ -11,7 +11,11 @@
 #include "fsl_iopctl.h"
 
 #ifndef EXP_LED_ACTIVE_LOW
-#define EXP_LED_ACTIVE_LOW 0
+#define EXP_LED_ACTIVE_LOW 1
+#endif
+
+#if EXP_LED_ACTIVE_LOW != 1
+#error "MIMXRT595 EVK D19 RGB LED is active-low; do not override EXP_LED_ACTIVE_LOW."
 #endif
 
 #define EXP_LED_RED_PORT BOARD_LED_RED_GPIO_PORT
@@ -23,11 +27,15 @@
 
 static inline uint8_t EXP_LED_Level(bool on)
 {
-#if EXP_LED_ACTIVE_LOW
+    /* MIMXRT595-EVK D19 RGB LED is active-low: low = on, high = off. */
     return on ? 0U : 1U;
-#else
-    return on ? 1U : 0U;
-#endif
+}
+
+static inline void EXP_LED_RawLevels(uint8_t red, uint8_t green, uint8_t blue)
+{
+    GPIO_PinWrite(GPIO, EXP_LED_RED_PORT, EXP_LED_RED_PIN, red);
+    GPIO_PinWrite(GPIO, EXP_LED_GREEN_PORT, EXP_LED_GREEN_PIN, green);
+    GPIO_PinWrite(GPIO, EXP_LED_BLUE_PORT, EXP_LED_BLUE_PIN, blue);
 }
 
 static inline void EXP_LED_EnableClocks(void)
@@ -52,9 +60,7 @@ static inline void EXP_LED_PinMuxGpio(uint32_t port, uint32_t pin)
 
 static inline void EXP_LED_Set(bool red, bool green, bool blue)
 {
-    GPIO_PinWrite(GPIO, EXP_LED_RED_PORT, EXP_LED_RED_PIN, EXP_LED_Level(red));
-    GPIO_PinWrite(GPIO, EXP_LED_GREEN_PORT, EXP_LED_GREEN_PIN, EXP_LED_Level(green));
-    GPIO_PinWrite(GPIO, EXP_LED_BLUE_PORT, EXP_LED_BLUE_PIN, EXP_LED_Level(blue));
+    EXP_LED_RawLevels(EXP_LED_Level(red), EXP_LED_Level(green), EXP_LED_Level(blue));
 }
 
 static inline void EXP_LED_Init(void)
