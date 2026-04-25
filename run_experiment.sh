@@ -99,6 +99,9 @@ DEVICE=${RT595_DEVICE:-MIMXRT595S:EVK-MIMXRT595}
 MASTER_PROBE=${RT595_MASTER_PROBE:-${RT595_PROBE:-PRASAQKQ}}
 SLAVE_PROBE=${RT595_SLAVE_PROBE:-GRA1CQLQ}
 EXIT_TIMEOUT=${RT595_EXIT_TIMEOUT:-20}
+FLASH_STATE_DIR=${RT595_FLASH_STATE_DIR:-$REPO_DIR/.local/state}
+SLAVE_RESET_PULSE_MS=${RT595_SLAVE_RESET_PULSE_MS:-50}
+SLAVE_RESET_SETTLE=${RT595_SLAVE_RESET_SETTLE:-1}
 SLAVE_READY_TIMEOUT=${RT595_SLAVE_READY_TIMEOUT:-20}
 SLAVE_READY_PATTERN=${RT595_SLAVE_READY_PATTERN:-'slave: waiting for master traff|slave: armed'}
 SLAVE_POST_MASTER_WAIT=${RT595_SLAVE_POST_MASTER_WAIT:-1}
@@ -167,6 +170,60 @@ run_with_eintr_retry() {
     rm -f "$log_file"
     return "$status"
   done
+}
+
+ensure_flash_state_dir() {
+  mkdir -p "$FLASH_STATE_DIR"
+}
+
+file_hash() {
+  local file=$1
+
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    cksum "$file" | awk '{print $1 ":" $2}'
+  fi
+}
+
+slave_flash_stamp_file() {
+  printf '%s/slave-flash-%s.sha256\n' "$FLASH_STATE_DIR" "$SLAVE_PROBE"
+}
+
+slave_flash_required() {
+  local current_hash=$1
+  local stamp_file=$2
+  local previous_hash
+
+  if [[ "${RT595_FORCE_SLAVE_FLASH:-0}" == 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$stamp_file" ]]; then
+    return 0
+  fi
+
+  previous_hash=$(tr -d '[:space:]' < "$stamp_file")
+  [[ "$previous_hash" != "$current_hash" ]]
+}
+
+record_slave_flash() {
+  local current_hash=$1
+  local stamp_file=$2
+
+  ensure_flash_state_dir
+  printf '%s\n' "$current_hash" > "$stamp_file"
+}
+
+reset_slave_board() {
+  local log_file=$1
+
+  : > "$log_file"
+  printf 'slave reset-only start on %s\n' "$SLAVE_PROBE" >> "$log_file"
+  run_with_eintr_retry "$LINKSERVER" probe "$SLAVE_PROBE" wiretimedreset "$SLAVE_RESET_PULSE_MS"
+  sleep "$SLAVE_RESET_SETTLE"
 }
 
 wait_for_slave_ready() {
@@ -497,25 +554,26 @@ MASTER_ELF="$MASTER_BUILD_DIR/evkmimxrt595_ezhb.axf"
 SLAVE_ELF="$SLAVE_BUILD_DIR/slave.axf"
 MASTER_LOG="$BUILD_DIR/master_run.log"
 SLAVE_LOG="$BUILD_DIR/slave_run.log"
+SLAVE_ELF_HASH=$(file_hash "$SLAVE_ELF")
+SLAVE_FLASH_STAMP=$(slave_flash_stamp_file)
 
-echo "Flashing slave on $SLAVE_PROBE"
-run_with_eintr_retry "$LINKSERVER" flash -p "$SLAVE_PROBE" "$DEVICE" load -e "$SLAVE_ELF"
-run_with_eintr_retry "$LINKSERVER" flash -p "$SLAVE_PROBE" "$DEVICE" verify "$SLAVE_ELF"
+if slave_flash_required "$SLAVE_ELF_HASH" "$SLAVE_FLASH_STAMP"; then
+  echo "Flashing slave on $SLAVE_PROBE"
+  run_with_eintr_retry "$LINKSERVER" flash -p "$SLAVE_PROBE" "$DEVICE" load -e "$SLAVE_ELF"
+  run_with_eintr_retry "$LINKSERVER" flash -p "$SLAVE_PROBE" "$DEVICE" verify "$SLAVE_ELF"
+  record_slave_flash "$SLAVE_ELF_HASH" "$SLAVE_FLASH_STAMP"
+else
+  echo "Skipping slave flash on $SLAVE_PROBE; image unchanged"
+fi
 
-echo "Running slave on $SLAVE_PROBE"
-start_slave_run "$SLAVE_LOG"
-
-trap cleanup_slave_run EXIT
+echo "Resetting slave on $SLAVE_PROBE"
+reset_slave_board "$SLAVE_LOG"
 
 echo "Running master on $MASTER_PROBE"
 set +e
 "$LINKSERVER" run -p "$MASTER_PROBE" --exit-timeout "$EXIT_TIMEOUT" "$DEVICE" "$MASTER_ELF" 2>&1 | tee "$MASTER_LOG"
 MASTER_STATUS=${PIPESTATUS[0]}
 set -e
-
-sleep "$SLAVE_POST_MASTER_WAIT"
-cleanup_slave_run
-trap - EXIT
 
 if [[ $MASTER_STATUS -ne 0 ]]; then
   echo "master exit code: $MASTER_STATUS" >&2

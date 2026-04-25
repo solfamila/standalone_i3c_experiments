@@ -116,8 +116,6 @@ typedef struct _i3c_dma_byte_bridge_param
     uint32_t remainingCount;
     uint32_t descriptorAddress;
     uint32_t i3cBaseAddress;
-    uint32_t i3cMdmaCtrlAddress;
-    uint32_t i3cOneFrameMdmaCtrlValue;
     uint32_t dmaIntaAddress;
     uint32_t dmaSetValidAddress;
     uint32_t dmaEnableSetAddress;
@@ -130,6 +128,20 @@ typedef struct _i3c_dma_byte_bridge_param
     volatile uint32_t dmaIntaCount;
 } i3c_dma_byte_bridge_param_t;
 
+typedef struct _bridge_failure_snapshot
+{
+    bool valid;
+    uint32_t dmaIntStat;
+    uint32_t dmaInta;
+    uint32_t dmaActive;
+    uint32_t dmaCfg;
+    uint32_t dmaCtlStat;
+    uint32_t dmaXferCfg;
+    uint32_t i3cMdmaCtrl;
+    uint32_t i3cMstatus;
+    uint32_t i3cMdataCtrl;
+} bridge_failure_snapshot_t;
+
 AT_NONCACHEABLE_SECTION_ALIGN(static dma_descriptor_t s_dma_descriptor_table[FSL_FEATURE_DMA_MAX_CHANNELS],
                               FSL_FEATURE_DMA_DESCRIPTOR_ALIGN_SIZE);
 AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t s_tx_buffer[I3C_DMA_BRIDGE_LENGTH], 4);
@@ -140,6 +152,7 @@ static volatile uint32_t s_i3c_irq_status_latched = 0U;
 static volatile uint32_t s_cm33_i3c_irq_count = 0U;
 static volatile uint32_t s_cm33_i3c_data_irq_count = 0U;
 static volatile uint32_t s_cm33_i3c_protocol_irq_count = 0U;
+static bridge_failure_snapshot_t s_failure_snapshot;
 
 static void smartdma_completion_callback(void *param)
 {
@@ -195,6 +208,20 @@ static void clear_dma0_channel_state(void)
     DMA0->COMMON[0].ERRINT = channel_mask;
     DMA0->COMMON[0].INTENCLR = channel_mask;
     DMA0->COMMON[0].ENABLECLR = channel_mask;
+}
+
+static void capture_failure_snapshot(I3C_Type *base)
+{
+    s_failure_snapshot.valid = true;
+    s_failure_snapshot.dmaIntStat = DMA0->INTSTAT;
+    s_failure_snapshot.dmaInta = DMA0->COMMON[0].INTA;
+    s_failure_snapshot.dmaActive = DMA0->COMMON[0].ACTIVE;
+    s_failure_snapshot.dmaCfg = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].CFG;
+    s_failure_snapshot.dmaCtlStat = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].CTLSTAT;
+    s_failure_snapshot.dmaXferCfg = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].XFERCFG;
+    s_failure_snapshot.i3cMdmaCtrl = base->MDMACTRL;
+    s_failure_snapshot.i3cMstatus = base->MSTATUS;
+    s_failure_snapshot.i3cMdataCtrl = base->MDATACTRL;
 }
 
 static void fill_tx_buffer(void)
@@ -361,7 +388,6 @@ static void configure_dma_byte_bridge(I3C_Type *base)
     const uint32_t one_byte_xfercfg = DMA_CHANNEL_XFERCFG_CFGVALID(1U) | DMA_CHANNEL_XFERCFG_SETINTA(1U) |
                                       DMA_CHANNEL_XFERCFG_WIDTH(0U) | DMA_CHANNEL_XFERCFG_SRCINC(1U) |
                                       DMA_CHANNEL_XFERCFG_DSTINC(0U) | DMA_CHANNEL_XFERCFG_XFERCOUNT(0U);
-    const uint32_t one_frame_mdmactrl = I3C_MDMACTRL_DMATB(1U) | I3C_MDMACTRL_DMAWIDTH(1U);
 
     CLOCK_EnableClock(kCLOCK_Dmac0);
     RESET_PeripheralReset(kDMAC0_RST_SHIFT_RSTn);
@@ -379,8 +405,6 @@ static void configure_dma_byte_bridge(I3C_Type *base)
     s_probe_param.remainingCount = I3C_DMA_BRIDGE_LENGTH - 1U;
     s_probe_param.descriptorAddress = (uint32_t)(uintptr_t)&s_dma_descriptor_table[I3C_DMA_TX_CHANNEL];
     s_probe_param.i3cBaseAddress = (uint32_t)(uintptr_t)base;
-    s_probe_param.i3cMdmaCtrlAddress = (uint32_t)(uintptr_t)&base->MDMACTRL;
-    s_probe_param.i3cOneFrameMdmaCtrlValue = one_frame_mdmactrl;
     s_probe_param.dmaIntaAddress = (uint32_t)(uintptr_t)&DMA0->COMMON[0].INTA;
     s_probe_param.dmaSetValidAddress = (uint32_t)(uintptr_t)&DMA0->COMMON[0].SETVALID;
     s_probe_param.dmaEnableSetAddress = (uint32_t)(uintptr_t)&DMA0->COMMON[0].ENABLESET;
@@ -398,7 +422,6 @@ static void arm_initial_dma_bridge_byte(I3C_Type *base)
     descriptor->dstEndAddr = (void *)&base->MWDATAB;
     descriptor->linkToNextDesc = NULL;
 
-    base->MDMACTRL = s_probe_param.i3cOneFrameMdmaCtrlValue;
     DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].XFERCFG = s_probe_param.dmaOneByteXfercfg;
     DMA0->COMMON[0].ENABLESET = s_probe_param.dmaChannelMask;
     DMA0->COMMON[0].SETVALID = s_probe_param.dmaChannelMask;
@@ -425,13 +448,38 @@ static void dump_bridge_counters(void)
 
 static void dump_debug_state(I3C_Type *base)
 {
-    EXP_LOG_INFO("DMA0 INTSTAT=0x%08lx", (unsigned long)DMA0->INTSTAT);
-    EXP_LOG_INFO("DMA0 INTA=0x%08lx", (unsigned long)DMA0->COMMON[0].INTA);
-    EXP_LOG_INFO("DMA0 ACTIVE=0x%08lx", (unsigned long)DMA0->COMMON[0].ACTIVE);
-    EXP_LOG_INFO("DMA0 CH25 CTLSTAT=0x%08lx", (unsigned long)DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].CTLSTAT);
-    EXP_LOG_INFO("DMA0 CH25 XFERCFG=0x%08lx", (unsigned long)DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].XFERCFG);
-    EXP_LOG_INFO("I3C MSTATUS=0x%08lx", (unsigned long)base->MSTATUS);
-    EXP_LOG_INFO("I3C MDATACTRL=0x%08lx", (unsigned long)base->MDATACTRL);
+    uint32_t dma_intstat = DMA0->INTSTAT;
+    uint32_t dma_inta = DMA0->COMMON[0].INTA;
+    uint32_t dma_active = DMA0->COMMON[0].ACTIVE;
+    uint32_t dma_cfg = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].CFG;
+    uint32_t dma_ctlstat = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].CTLSTAT;
+    uint32_t dma_xfercfg = DMA0->CHANNEL[I3C_DMA_TX_CHANNEL].XFERCFG;
+    uint32_t i3c_mdmactrl = base->MDMACTRL;
+    uint32_t i3c_mstatus = base->MSTATUS;
+    uint32_t i3c_mdatactrl = base->MDATACTRL;
+
+    if (s_failure_snapshot.valid)
+    {
+        dma_intstat = s_failure_snapshot.dmaIntStat;
+        dma_inta = s_failure_snapshot.dmaInta;
+        dma_active = s_failure_snapshot.dmaActive;
+        dma_cfg = s_failure_snapshot.dmaCfg;
+        dma_ctlstat = s_failure_snapshot.dmaCtlStat;
+        dma_xfercfg = s_failure_snapshot.dmaXferCfg;
+        i3c_mdmactrl = s_failure_snapshot.i3cMdmaCtrl;
+        i3c_mstatus = s_failure_snapshot.i3cMstatus;
+        i3c_mdatactrl = s_failure_snapshot.i3cMdataCtrl;
+    }
+
+    EXP_LOG_INFO("DMA0 INTSTAT=0x%08lx", (unsigned long)dma_intstat);
+    EXP_LOG_INFO("DMA0 INTA=0x%08lx", (unsigned long)dma_inta);
+    EXP_LOG_INFO("DMA0 ACTIVE=0x%08lx", (unsigned long)dma_active);
+    EXP_LOG_INFO("DMA0 CH25 CFG=0x%08lx", (unsigned long)dma_cfg);
+    EXP_LOG_INFO("DMA0 CH25 CTLSTAT=0x%08lx", (unsigned long)dma_ctlstat);
+    EXP_LOG_INFO("DMA0 CH25 XFERCFG=0x%08lx", (unsigned long)dma_xfercfg);
+    EXP_LOG_INFO("I3C MDMACTRL=0x%08lx", (unsigned long)i3c_mdmactrl);
+    EXP_LOG_INFO("I3C MSTATUS=0x%08lx", (unsigned long)i3c_mstatus);
+    EXP_LOG_INFO("I3C MDATACTRL=0x%08lx", (unsigned long)i3c_mdatactrl);
     EXP_LOG_INFO("I3C latched IRQ mask=0x%08lx", (unsigned long)s_i3c_irq_status_latched);
     EXP_LOG_INFO("SmartDMA mailbox=%lu", (unsigned long)s_probe_param.mailbox);
 
@@ -449,6 +497,7 @@ static status_t run_i3c_dma_byte_bridge_proof(I3C_Type *base, uint8_t slaveAddr)
     s_cm33_i3c_irq_count = 0U;
     s_cm33_i3c_data_irq_count = 0U;
     s_cm33_i3c_protocol_irq_count = 0U;
+    memset(&s_failure_snapshot, 0, sizeof(s_failure_snapshot));
 
     configure_dma_byte_bridge(base);
 
@@ -486,6 +535,7 @@ static status_t run_i3c_dma_byte_bridge_proof(I3C_Type *base, uint8_t slaveAddr)
     SMARTDMA_Boot(I3C_DMA_BRIDGE_API_INDEX, &s_probe_param, 0);
 
     I3C_MasterEnableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
+    I3C_MasterEnableDMA(base, true, false, 1U);
     arm_initial_dma_bridge_byte(base);
     result = I3C_MasterStart(base, kI3C_TypeI3CSdr, slaveAddr, kI3C_Write);
     if (result != kStatus_Success)
@@ -514,7 +564,12 @@ static status_t run_i3c_dma_byte_bridge_proof(I3C_Type *base, uint8_t slaveAddr)
     result = I3C_MasterStop(base);
 
 exit:
-    base->MDMACTRL &= ~I3C_MDMACTRL_DMATB_MASK;
+    if (result != kStatus_Success)
+    {
+        capture_failure_snapshot(base);
+    }
+
+    I3C_MasterEnableDMA(base, false, false, 1U);
     I3C_MasterDisableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
     I3C_MasterSetWatermarks(base,
                             (i3c_tx_trigger_level_t)saved_tx_trigger_level,

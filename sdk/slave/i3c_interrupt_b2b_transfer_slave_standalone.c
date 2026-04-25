@@ -6,7 +6,7 @@
 
 void *experiment_memset(void *ptr, int value, size_t num);
 
-#define APP_ENABLE_SEMIHOST 1
+#define APP_ENABLE_SEMIHOST 0
 #define EXPERIMENT_SLAVE_ECHO_COUNT_PLUS_ONE 1
 #define memset experiment_memset
 
