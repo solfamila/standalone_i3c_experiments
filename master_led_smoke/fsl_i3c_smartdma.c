@@ -1,0 +1,1 @@
+/* LED smoke test does not use the I3C SmartDMA driver override. */

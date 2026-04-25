@@ -23,6 +23,7 @@
 #include "fsl_power.h"
 #include "fsl_inputmux.h"
 #include "fsl_i3c.h"
+#include "experiment_led.h"
 
 #if defined(EXPERIMENT_USE_PW_LOG)
 #define PW_LOG_MODULE_NAME "archive-master"
@@ -139,6 +140,11 @@ static void i3c_master_callback(I3C_Type *base,
 #define EXPERIMENT_I3C_PP_BAUDRATE EXAMPLE_I3C_PP_BAUDRATE
 #endif
 
+#define EXPERIMENT_LED_BOOT_PULSE_COUNT 2U
+#define EXPERIMENT_LED_BOOT_PULSE_US 100000U
+#define EXPERIMENT_LED_SUCCESS_PULSE_COUNT 3U
+#define EXPERIMENT_LED_SUCCESS_PULSE_US 120000U
+
 extern uint8_t __smartdma_start__[];
 extern uint8_t __smartdma_end__[];
 
@@ -155,6 +161,24 @@ static const i3c_master_smartdma_callback_t masterCallback = {
 static volatile bool g_masterCompletionFlag = false;
 static volatile bool g_ibiWonFlag = false;
 static volatile status_t g_completionStatus = kStatus_Success;
+
+static void init_status_led(void)
+{
+    EXP_LED_Init();
+    EXP_LED_Blink(false, false, true, EXPERIMENT_LED_BOOT_PULSE_COUNT, EXPERIMENT_LED_BOOT_PULSE_US);
+    EXP_LED_Set(false, false, true);
+}
+
+static void set_success_led(void)
+{
+    EXP_LED_Blink(false, true, false, EXPERIMENT_LED_SUCCESS_PULSE_COUNT, EXPERIMENT_LED_SUCCESS_PULSE_US);
+    EXP_LED_Set(false, true, false);
+}
+
+static void set_failure_led(void)
+{
+    EXP_LED_Set(true, false, false);
+}
 
 #ifndef EXPERIMENT_USE_SMARTDMA
 #define EXPERIMENT_USE_SMARTDMA 1
@@ -298,6 +322,7 @@ int main(void)
     status_t result;
 
     BOARD_InitHardware();
+    init_status_led();
 
     for (volatile uint32_t startup_delay = 0U; startup_delay < EXPERIMENT_STARTUP_WAIT; startup_delay++)
     {
@@ -368,6 +393,7 @@ int main(void)
     {
         PRINTF("\r\nRSTDAA failed: %d\r\n", result);
         EXP_LOG_ERROR("RSTDAA failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -376,6 +402,7 @@ int main(void)
     {
         PRINTF("\r\nDAA failed: %d\r\n", result);
         EXP_LOG_ERROR("DAA failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -402,6 +429,7 @@ int main(void)
     {
         PRINTF("\r\nTarget slave not found.\r\n");
         EXP_LOG_ERROR("Target slave not found.");
+        set_failure_led();
         return -1;
     }
 
@@ -452,6 +480,7 @@ int main(void)
     {
         PRINTF("\r\nWrite transfer failed: %d\r\n", result);
         EXP_LOG_ERROR("Write transfer failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -475,6 +504,7 @@ int main(void)
     {
         PRINTF("\r\nRead transfer failed: %d\r\n", result);
         EXP_LOG_ERROR("Read transfer failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -490,12 +520,14 @@ int main(void)
             log_buffer_prefix("Expected buffer prefix:", ezh_data_buffer, sizeof(ezh_data_buffer));
             log_buffer_prefix("Received buffer prefix:", ezh_data_buffer_rx, sizeof(ezh_data_buffer_rx));
             EXP_LOG_ERROR("Error occurred in the transfer!");
+            set_failure_led();
             return -1;
         }
     }
 
     PRINTF("\r\nI3C master transfer successful in I3C SDR mode.\r\n");
     EXP_LOG_INFO("I3C master transfer successful in I3C SDR mode.");
+    set_success_led();
     return 0;
 }
 

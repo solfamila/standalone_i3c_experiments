@@ -231,6 +231,23 @@ static void i3c_slave_service_activity_led(void)
     g_slaveActivityLedCompletionPending = false;
 }
 
+#if defined(EXPERIMENT_LED_SMOKE)
+static void i3c_slave_run_led_smoke(void)
+{
+    for (;;)
+    {
+        EXP_LED_Set(true, false, false);
+        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
+        EXP_LED_Set(false, true, false);
+        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
+        EXP_LED_Set(false, false, true);
+        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
+        EXP_LED_Set(false, false, false);
+        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
+    }
+}
+#endif
+
 /*******************************************************************************
  * Code
  ******************************************************************************/
@@ -484,6 +501,11 @@ int main(void)
     BOARD_BootClockRUN();
     i3c_slave_init_activity_led();
     i3c_slave_run_boot_led_self_test();
+
+#if defined(EXPERIMENT_LED_SMOKE)
+    i3c_slave_run_led_smoke();
+#endif
+
     i3c_slave_enable_retained_trace_ram();
     i3c_slave_reset_retained_trace();
     semihost_write0("slave: boot init done\n");

@@ -20,6 +20,7 @@
 #include "fsl_smartdma.h"
 #include "app.h"
 #include "board.h"
+#include "experiment_led.h"
 
 #define I3C_DMA_PROOF_LENGTH 8U
 #define I3C_DMA_PROOF_TIMEOUT 100000000U
@@ -32,6 +33,10 @@
 #define I3C_DMA_PROOF_I3C_OD_BAUDRATE EXAMPLE_I3C_OD_BAUDRATE
 #define I3C_DMA_PROOF_I3C_PP_BAUDRATE 4000000U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
+#define I3C_DMA_PROOF_LED_BOOT_PULSE_COUNT 2U
+#define I3C_DMA_PROOF_LED_BOOT_PULSE_US 100000U
+#define I3C_DMA_PROOF_LED_SUCCESS_PULSE_COUNT 3U
+#define I3C_DMA_PROOF_LED_SUCCESS_PULSE_US 120000U
 
 extern uint8_t __smartdma_start__[];
 extern uint8_t __smartdma_end__[];
@@ -119,6 +124,24 @@ AT_NONCACHEABLE_SECTION_ALIGN(static volatile uint32_t s_smartdma_mailbox, 4);
 AT_NONCACHEABLE_SECTION_ALIGN(static i3c_dma_irq_probe_param_t s_probe_param, 4);
 
 static volatile bool s_smartdma_irq_fired = false;
+
+static void init_status_led(void)
+{
+    EXP_LED_Init();
+    EXP_LED_Blink(false, false, true, I3C_DMA_PROOF_LED_BOOT_PULSE_COUNT, I3C_DMA_PROOF_LED_BOOT_PULSE_US);
+    EXP_LED_Set(false, false, true);
+}
+
+static void set_success_led(void)
+{
+    EXP_LED_Blink(false, true, false, I3C_DMA_PROOF_LED_SUCCESS_PULSE_COUNT, I3C_DMA_PROOF_LED_SUCCESS_PULSE_US);
+    EXP_LED_Set(false, true, false);
+}
+
+static void set_failure_led(void)
+{
+    EXP_LED_Set(true, false, false);
+}
 
 static void smartdma_completion_callback(void *param)
 {
@@ -376,6 +399,7 @@ int main(void)
     uint8_t slaveAddr = 0U;
 
     BOARD_InitHardware();
+    init_status_led();
 
     for (volatile uint32_t startup_delay = 0U; startup_delay < I3C_DMA_PROOF_STARTUP_WAIT; startup_delay++)
     {
@@ -403,6 +427,7 @@ int main(void)
     if (result != kStatus_Success)
     {
         EXP_LOG_ERROR("DAA setup failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -414,6 +439,7 @@ int main(void)
     {
         EXP_LOG_ERROR("I3C DMA request proof failed: %d", result);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -421,10 +447,12 @@ int main(void)
     {
         EXP_LOG_ERROR("SmartDMA mailbox mismatch: %lu", (unsigned long)s_smartdma_mailbox);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
     EXP_LOG_INFO("I3C DMA request to DMA0 IRQ to SmartDMA proof successful.");
     PRINTF("I3C DMA request to DMA0 IRQ to SmartDMA proof successful.\r\n");
+    set_success_led();
     return 0;
 }

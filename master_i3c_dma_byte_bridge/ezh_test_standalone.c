@@ -20,6 +20,7 @@
 #include "fsl_smartdma.h"
 #include "app.h"
 #include "board.h"
+#include "experiment_led.h"
 
 #define I3C_DMA_BRIDGE_LENGTH 32U
 #define I3C_DMA_BRIDGE_TIMEOUT 100000000U
@@ -32,6 +33,10 @@
 #define I3C_DMA_BRIDGE_I3C_OD_BAUDRATE EXAMPLE_I3C_OD_BAUDRATE
 #define I3C_DMA_BRIDGE_I3C_PP_BAUDRATE 4000000U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
+#define I3C_DMA_BRIDGE_LED_BOOT_PULSE_COUNT 2U
+#define I3C_DMA_BRIDGE_LED_BOOT_PULSE_US 100000U
+#define I3C_DMA_BRIDGE_LED_SUCCESS_PULSE_COUNT 3U
+#define I3C_DMA_BRIDGE_LED_SUCCESS_PULSE_US 120000U
 
 #define I3C_PROTOCOL_IRQ_MASK ((uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag | \
                                (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag | \
@@ -153,6 +158,24 @@ static volatile uint32_t s_cm33_i3c_irq_count = 0U;
 static volatile uint32_t s_cm33_i3c_data_irq_count = 0U;
 static volatile uint32_t s_cm33_i3c_protocol_irq_count = 0U;
 static bridge_failure_snapshot_t s_failure_snapshot;
+
+static void init_status_led(void)
+{
+    EXP_LED_Init();
+    EXP_LED_Blink(false, false, true, I3C_DMA_BRIDGE_LED_BOOT_PULSE_COUNT, I3C_DMA_BRIDGE_LED_BOOT_PULSE_US);
+    EXP_LED_Set(false, false, true);
+}
+
+static void set_success_led(void)
+{
+    EXP_LED_Blink(false, true, false, I3C_DMA_BRIDGE_LED_SUCCESS_PULSE_COUNT, I3C_DMA_BRIDGE_LED_SUCCESS_PULSE_US);
+    EXP_LED_Set(false, true, false);
+}
+
+static void set_failure_led(void)
+{
+    EXP_LED_Set(true, false, false);
+}
 
 static void smartdma_completion_callback(void *param)
 {
@@ -594,6 +617,7 @@ int main(void)
     uint8_t slaveAddr = 0U;
 
     BOARD_InitHardware();
+    init_status_led();
 
     for (volatile uint32_t startup_delay = 0U; startup_delay < I3C_DMA_BRIDGE_STARTUP_WAIT; startup_delay++)
     {
@@ -621,6 +645,7 @@ int main(void)
     if (result != kStatus_Success)
     {
         EXP_LOG_ERROR("DAA setup failed: %d", result);
+        set_failure_led();
         return -1;
     }
 
@@ -632,6 +657,7 @@ int main(void)
     {
         EXP_LOG_ERROR("I3C DMA byte bridge proof failed: %d", result);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -639,6 +665,7 @@ int main(void)
     {
         EXP_LOG_ERROR("SmartDMA mailbox mismatch: %lu", (unsigned long)s_probe_param.mailbox);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -649,6 +676,7 @@ int main(void)
                       (unsigned long)s_probe_param.smartdmaBytes,
                       I3C_DMA_BRIDGE_LENGTH);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -656,6 +684,7 @@ int main(void)
     {
         EXP_LOG_ERROR("Expected at least one SmartDMA wake.");
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -665,6 +694,7 @@ int main(void)
                       (unsigned long)s_probe_param.dmaBridgeBytes,
                       (unsigned long)s_probe_param.smartdmaBytes);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -672,6 +702,7 @@ int main(void)
     {
         EXP_LOG_ERROR("Unexpected CM33 I3C data-ready IRQ count: %lu", (unsigned long)s_cm33_i3c_data_irq_count);
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
@@ -679,11 +710,13 @@ int main(void)
     {
         EXP_LOG_ERROR("Expected protocol IRQs to remain visible on CM33.");
         dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
         return -1;
     }
 
     dump_bridge_counters();
     EXP_LOG_INFO("I3C DMA byte bridge to SmartDMA proof successful.");
     PRINTF("I3C DMA byte bridge to SmartDMA proof successful.\r\n");
+    set_success_led();
     return 0;
 }

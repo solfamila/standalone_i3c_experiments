@@ -18,12 +18,17 @@
 #include "fsl_smartdma.h"
 #include "app.h"
 #include "board.h"
+#include "experiment_led.h"
 
 #define DMA_PROOF_CHANNEL 0U
 #define DMA_PROOF_BYTES 8U
 #define DMA_PROOF_TIMEOUT 10000000U
 #define DMA_PROOF_API_INDEX 0U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
+#define DMA_PROOF_LED_BOOT_PULSE_COUNT 2U
+#define DMA_PROOF_LED_BOOT_PULSE_US 100000U
+#define DMA_PROOF_LED_SUCCESS_PULSE_COUNT 3U
+#define DMA_PROOF_LED_SUCCESS_PULSE_US 120000U
 
 extern uint8_t __smartdma_start__[];
 extern uint8_t __smartdma_end__[];
@@ -110,6 +115,24 @@ AT_NONCACHEABLE_SECTION_ALIGN(static volatile uint32_t s_smartdma_mailbox, 4);
 AT_NONCACHEABLE_SECTION_ALIGN(static dma_irq_probe_param_t s_dma_irq_probe_param, 4);
 
 static volatile bool s_smartdma_irq_fired = false;
+
+static void init_status_led(void)
+{
+    EXP_LED_Init();
+    EXP_LED_Blink(false, false, true, DMA_PROOF_LED_BOOT_PULSE_COUNT, DMA_PROOF_LED_BOOT_PULSE_US);
+    EXP_LED_Set(false, false, true);
+}
+
+static void set_success_led(void)
+{
+    EXP_LED_Blink(false, true, false, DMA_PROOF_LED_SUCCESS_PULSE_COUNT, DMA_PROOF_LED_SUCCESS_PULSE_US);
+    EXP_LED_Set(false, true, false);
+}
+
+static void set_failure_led(void)
+{
+    EXP_LED_Set(true, false, false);
+}
 
 static void smartdma_completion_callback(void *param)
 {
@@ -209,6 +232,7 @@ int main(void)
     size_t index;
 
     BOARD_InitHardware();
+    init_status_led();
 
     PRINTF("\r\nDMA0 IRQ to SmartDMA probe -- master only.\r\n");
     EXP_LOG_INFO("DMA0 IRQ to SmartDMA probe -- master only.");
@@ -251,6 +275,7 @@ int main(void)
         PRINTF("DMA0 IRQ to SmartDMA proof timed out.\r\n");
         EXP_LOG_ERROR("DMA0 IRQ to SmartDMA proof timed out.");
         dump_dma_status();
+        set_failure_led();
         return 1;
     }
 
@@ -262,6 +287,7 @@ int main(void)
         PRINTF("SmartDMA mailbox mismatch: %lu\r\n", (unsigned long)s_smartdma_mailbox);
         EXP_LOG_ERROR("SmartDMA mailbox mismatch: %lu", (unsigned long)s_smartdma_mailbox);
         dump_dma_status();
+        set_failure_led();
         return 1;
     }
 
@@ -281,10 +307,12 @@ int main(void)
                           s_dma_destination[index]);
         }
         dump_dma_status();
+        set_failure_led();
         return 1;
     }
 
     PRINTF("DMA0 IRQ to SmartDMA proof successful.\r\n");
     EXP_LOG_INFO("DMA0 IRQ to SmartDMA proof successful.");
+    set_success_led();
     return 0;
 }

@@ -314,6 +314,10 @@ compile_master() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
+  if [[ "$EXPERIMENT_NAME" == master_led_smoke ]]; then
+    defines+=(EXPERIMENT_LED_SMOKE=1)
+  fi
+
   sources+=(
     "$MASTER_SDK_DIR/board/board.c"
     "$MASTER_SDK_DIR/board/clock_config.c"
@@ -434,6 +438,10 @@ compile_slave() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
+  if [[ "$EXPERIMENT_NAME" == master_led_smoke ]]; then
+    defines+=(EXPERIMENT_LED_SMOKE=1)
+  fi
+
   sources+=(
     "$SLAVE_SDK_DIR/board.c"
     "$SLAVE_SDK_DIR/clock_config.c"
@@ -534,6 +542,9 @@ validate_master_output() {
       ;;
     master_i3c_dma_seed_chain_probe)
       grep -q 'I3C DMA seed chain probe successful' "$output_file"
+      ;;
+    master_led_smoke)
+      grep -q 'LED smoke completed' "$output_file"
       ;;
     *)
       echo "unknown experiment: $experiment_name" >&2
