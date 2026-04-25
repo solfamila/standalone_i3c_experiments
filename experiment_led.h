@@ -11,7 +11,7 @@
 #include "fsl_iopctl.h"
 
 #ifndef EXP_LED_ACTIVE_LOW
-#define EXP_LED_ACTIVE_LOW 1
+#define EXP_LED_ACTIVE_LOW 0
 #endif
 
 #define EXP_LED_RED_PORT BOARD_LED_RED_GPIO_PORT

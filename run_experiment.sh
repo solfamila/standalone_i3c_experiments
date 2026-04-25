@@ -314,10 +314,6 @@ compile_master() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
-  if [[ "$EXPERIMENT_NAME" == master_led_smoke ]]; then
-    defines+=(EXPERIMENT_LED_SMOKE=1)
-  fi
-
   sources+=(
     "$MASTER_SDK_DIR/board/board.c"
     "$MASTER_SDK_DIR/board/clock_config.c"
@@ -437,10 +433,6 @@ compile_slave() {
   )
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
-
-  if [[ "$EXPERIMENT_NAME" == master_led_smoke ]]; then
-    defines+=(EXPERIMENT_LED_SMOKE=1)
-  fi
 
   sources+=(
     "$SLAVE_SDK_DIR/board.c"

@@ -52,7 +52,7 @@ int main(void)
         show_color(false, false, false, 500000U, "off");
     }
 
-    EXP_LED_Set(false, false, false);
-    smoke_log("LED smoke completed\n");
+    EXP_LED_Set(false, true, false);
+    smoke_log("LED smoke completed: steady green\n");
     return 0;
 }

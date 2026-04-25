@@ -164,11 +164,20 @@ volatile bool g_lastTransferWasReceive = false;
 __attribute__((section(".usb_ram"), used, aligned(4))) volatile slave_retained_trace_t g_slaveRetainedTrace;
 static volatile bool g_slaveActivityLedActive = false;
 static volatile bool g_slaveActivityLedCompletionPending = false;
+static volatile bool g_slaveActivityLedFinal = false;
 static volatile uint32_t g_slaveActivityLedPollCount = 0U;
 static volatile uint32_t g_slaveActivityLedToggleCount = 0U;
 
+static bool i3c_slave_roundtrip_done(void)
+{
+    const uint32_t doneFlags = kSlaveRetainedTraceRxCompleteSeen | kSlaveRetainedTraceTxCompleteSeen;
+
+    return (g_slaveRetainedTrace.eventFlags & doneFlags) == doneFlags;
+}
+
 static void i3c_slave_init_activity_led(void)
 {
+    g_slaveActivityLedFinal = false;
     EXP_LED_Init();
     EXP_LED_Set(false, true, false);
 }
@@ -181,6 +190,7 @@ static void i3c_slave_run_boot_led_self_test(void)
 
 static void i3c_slave_begin_activity_led(void)
 {
+    g_slaveActivityLedFinal = false;
     g_slaveActivityLedActive = true;
     g_slaveActivityLedCompletionPending = false;
     g_slaveActivityLedPollCount = 0U;
@@ -196,6 +206,7 @@ static void i3c_slave_complete_activity_led(void)
 
 static void i3c_slave_fail_activity_led(void)
 {
+    g_slaveActivityLedFinal = true;
     g_slaveActivityLedActive = false;
     g_slaveActivityLedCompletionPending = false;
     g_slaveActivityLedPollCount = 0U;
@@ -205,6 +216,22 @@ static void i3c_slave_fail_activity_led(void)
 
 static void i3c_slave_service_activity_led(void)
 {
+    if (g_slaveActivityLedFinal)
+    {
+        return;
+    }
+
+    if (i3c_slave_roundtrip_done())
+    {
+        g_slaveActivityLedActive = false;
+        g_slaveActivityLedCompletionPending = false;
+        g_slaveActivityLedPollCount = 0U;
+        g_slaveActivityLedToggleCount = 0U;
+        g_slaveActivityLedFinal = true;
+        EXP_LED_Set(false, true, false);
+        return;
+    }
+
     if (g_slaveActivityLedActive)
     {
         g_slaveActivityLedPollCount++;
@@ -230,23 +257,6 @@ static void i3c_slave_service_activity_led(void)
     g_slaveActivityLedToggleCount = 0U;
     g_slaveActivityLedCompletionPending = false;
 }
-
-#if defined(EXPERIMENT_LED_SMOKE)
-static void i3c_slave_run_led_smoke(void)
-{
-    for (;;)
-    {
-        EXP_LED_Set(true, false, false);
-        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
-        EXP_LED_Set(false, true, false);
-        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
-        EXP_LED_Set(false, false, true);
-        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
-        EXP_LED_Set(false, false, false);
-        SDK_DelayAtLeastUs(500000U, SystemCoreClock);
-    }
-}
-#endif
 
 /*******************************************************************************
  * Code
@@ -501,10 +511,6 @@ int main(void)
     BOARD_BootClockRUN();
     i3c_slave_init_activity_led();
     i3c_slave_run_boot_led_self_test();
-
-#if defined(EXPERIMENT_LED_SMOKE)
-    i3c_slave_run_led_smoke();
-#endif
 
     i3c_slave_enable_retained_trace_ram();
     i3c_slave_reset_retained_trace();
