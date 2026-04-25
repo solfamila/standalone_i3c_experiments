@@ -470,6 +470,9 @@ validate_master_output() {
     master_i3c_dma_irq_probe)
       grep -q 'I3C DMA request to DMA0 IRQ to SmartDMA proof successful' "$output_file"
       ;;
+    master_i3c_dma_byte_bridge)
+      grep -q 'I3C DMA byte bridge to SmartDMA proof successful' "$output_file"
+      ;;
     *)
       echo "unknown experiment: $experiment_name" >&2
       return 1
