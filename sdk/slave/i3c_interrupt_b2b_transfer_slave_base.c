@@ -13,6 +13,7 @@
 #include "board.h"
 #include "fsl_debug_console.h"
 #include "fsl_i3c.h"
+#include "fsl_iopctl.h"
 #include "fsl_power.h"
 #include "fsl_reset.h"
 
@@ -141,6 +142,10 @@ static void semihost_write0(const char *message)
 #define I3C_SLAVE_TX_DATA_LENGTH            255U
 #endif
 
+#define I3C_SLAVE_LED_TOGGLE_INTERVAL 250000U
+#define I3C_SLAVE_LED_VISIBLE_PULSE_US 200000U
+#define I3C_SLAVE_LED_VISIBLE_PULSE_COUNT 2U
+
 /*******************************************************************************
  * Variables
  ******************************************************************************/
@@ -157,6 +162,124 @@ uint8_t *g_deviceBuff = NULL;
 uint8_t g_deviceBuffSize = I3C_SLAVE_RX_DATA_LENGTH;
 volatile bool g_lastTransferWasReceive = false;
 __attribute__((section(".usb_ram"), used, aligned(4))) volatile slave_retained_trace_t g_slaveRetainedTrace;
+static volatile bool g_slaveActivityLedActive = false;
+static volatile bool g_slaveActivityLedCompletionPending = false;
+static volatile uint32_t g_slaveActivityLedPollCount = 0U;
+static volatile uint32_t g_slaveActivityLedToggleCount = 0U;
+
+static void slave_led_red_off(void)
+{
+    LED_RED_ON();
+}
+
+static void slave_led_green_off(void)
+{
+    LED_GREEN_ON();
+}
+
+static void slave_led_blue_on(void)
+{
+    LED_BLUE_OFF();
+}
+
+static void slave_led_blue_off(void)
+{
+    LED_BLUE_ON();
+}
+
+static void slave_led_blue_toggle(void)
+{
+    LED_BLUE_TOGGLE();
+}
+
+static void i3c_slave_configure_activity_led_pins(void)
+{
+    const uint32_t led_pin_config = IOPCTL_FUNC0 | IOPCTL_PUPD_EN | IOPCTL_PULLUP_EN | IOPCTL_INBUF_EN;
+
+    CLOCK_EnableClock(kCLOCK_HsGpio0);
+    CLOCK_EnableClock(kCLOCK_HsGpio1);
+    CLOCK_EnableClock(kCLOCK_HsGpio3);
+    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_RED_GPIO_PORT, BOARD_LED_RED_GPIO_PIN, led_pin_config);
+    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_GREEN_GPIO_PORT, BOARD_LED_GREEN_GPIO_PIN, led_pin_config);
+    IOPCTL_PinMuxSet(IOPCTL, BOARD_LED_BLUE_GPIO_PORT, BOARD_LED_BLUE_GPIO_PIN, led_pin_config);
+}
+
+static void i3c_slave_activity_led_delay_us(uint32_t delay_us)
+{
+    SDK_DelayAtLeastUs(delay_us, SystemCoreClock);
+}
+
+static void i3c_slave_init_activity_led(void)
+{
+    i3c_slave_configure_activity_led_pins();
+    LED_RED_INIT(LOGIC_LED_ON);
+    LED_GREEN_INIT(LOGIC_LED_ON);
+    LED_BLUE_INIT(LOGIC_LED_ON);
+    slave_led_red_off();
+    slave_led_green_off();
+    slave_led_blue_off();
+}
+
+static void i3c_slave_run_boot_led_self_test(void)
+{
+    slave_led_blue_on();
+    i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
+    slave_led_blue_off();
+    i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
+}
+
+static void i3c_slave_begin_activity_led(void)
+{
+    g_slaveActivityLedActive = true;
+    g_slaveActivityLedCompletionPending = false;
+    g_slaveActivityLedPollCount = 0U;
+    g_slaveActivityLedToggleCount = 0U;
+    slave_led_blue_on();
+}
+
+static void i3c_slave_complete_activity_led(void)
+{
+    g_slaveActivityLedActive = false;
+    g_slaveActivityLedCompletionPending = true;
+}
+
+static void i3c_slave_service_activity_led(void)
+{
+    if (g_slaveActivityLedActive)
+    {
+        g_slaveActivityLedPollCount++;
+        if (g_slaveActivityLedPollCount < I3C_SLAVE_LED_TOGGLE_INTERVAL)
+        {
+            return;
+        }
+
+        g_slaveActivityLedPollCount = 0U;
+        g_slaveActivityLedToggleCount++;
+        slave_led_blue_toggle();
+        return;
+    }
+
+    if (!g_slaveActivityLedCompletionPending)
+    {
+        return;
+    }
+
+    if (g_slaveActivityLedToggleCount == 0U)
+    {
+        for (uint32_t pulseIndex = 0U; pulseIndex < I3C_SLAVE_LED_VISIBLE_PULSE_COUNT; pulseIndex++)
+        {
+            slave_led_blue_on();
+            i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
+            slave_led_blue_off();
+            i3c_slave_activity_led_delay_us(I3C_SLAVE_LED_VISIBLE_PULSE_US);
+        }
+    }
+
+    slave_led_blue_off();
+    g_slaveActivityLedPollCount = 0U;
+    g_slaveActivityLedToggleCount = 0U;
+    g_slaveActivityLedCompletionPending = false;
+}
 
 /*******************************************************************************
  * Code
@@ -338,6 +461,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             break;
 
         case kI3C_SlaveStartEvent:
+            i3c_slave_begin_activity_led();
             break;
 
         case (kI3C_SlaveTransmitEvent | kI3C_SlaveHDRCommandMatchEvent):
@@ -353,6 +477,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             break;
 
         case kI3C_SlaveCompletionEvent:
+            i3c_slave_complete_activity_led();
             if (xfer->completionStatus == kStatus_Success)
             {
                 if (g_lastTransferWasReceive)
@@ -406,6 +531,8 @@ int main(void)
 
     BOARD_InitBootPins();
     BOARD_BootClockRUN();
+    i3c_slave_init_activity_led();
+    i3c_slave_run_boot_led_self_test();
     i3c_slave_enable_retained_trace_ram();
     i3c_slave_reset_retained_trace();
     semihost_write0("slave: boot init done\n");
@@ -451,6 +578,7 @@ int main(void)
 
     while (1)
     {
+        i3c_slave_service_activity_led();
         i3c_slave_flush_trace();
 
         if ((!dynamicAddrReported) && ((EXAMPLE_SLAVE->SDYNADDR & I3C_SDYNADDR_DAVALID_MASK) != 0U))
