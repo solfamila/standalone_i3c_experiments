@@ -190,7 +190,11 @@ static void i3c_slave_run_boot_led_self_test(void)
 
 static void i3c_slave_begin_activity_led(void)
 {
-    g_slaveActivityLedFinal = false;
+    if (g_slaveActivityLedFinal)
+    {
+        return;
+    }
+
     g_slaveActivityLedActive = true;
     g_slaveActivityLedCompletionPending = false;
     g_slaveActivityLedPollCount = 0U;
