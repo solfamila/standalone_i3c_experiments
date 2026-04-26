@@ -408,8 +408,6 @@ struct _i3c_master_handle
 
 /*! @brief Typedef for master interrupt handler. */
 typedef void (*i3c_master_isr_t)(I3C_Type *base, void *handle);
-/* Not static so it can be used from fsl_i3c_dma.c. */
-status_t I3C_MasterWaitForTxReady(I3C_Type *base, uint8_t byteCounts);
 
 /*! @} */
 
@@ -620,6 +618,8 @@ struct _i3c_slave_handle
     bool wasTransmit;                       /*!< Whether the last transfer was a transmit. */
     uint32_t eventMask;                     /*!< Mask of enabled events. */
     uint32_t transferredCount;              /*!< Count of bytes transferred. */
+    uint8_t *rxDataBase;                    /*!< Current RX buffer base pointer. */
+    size_t rxDataSize;                      /*!< Current RX buffer size when it was supplied. */
     i3c_slave_transfer_callback_t callback; /*!< Callback function called at transfer event. */
     void *userData;                         /*!< Callback parameter passed to callback. */
     size_t txFifoSize;                      /*!< Tx Fifo size */
@@ -717,6 +717,90 @@ extern "C" {
  * @param base The I3C peripheral base address.
  */
 uint32_t I3C_GetInstance(I3C_Type *base);
+
+/*!
+ * @brief Returns the number of master IRQ entries observed for this I3C instance.
+ *
+ * @param base The I3C peripheral base address.
+ * @return Number of times the CM33 master IRQ handler has been entered.
+ */
+uint32_t I3C_MasterGetIrqEntryCount(I3C_Type *base);
+
+/*!
+ * @brief Returns the number of master IRQ entries observed while the transfer was in a control phase.
+ *
+ * @param base The I3C peripheral base address.
+ * @return Number of CM33 master IRQ entries seen outside the SmartDMA data window.
+ */
+uint32_t I3C_MasterGetControlIrqEntryCount(I3C_Type *base);
+
+/*!
+ * @brief Returns the number of master IRQ entries observed while the transfer was in a data phase.
+ *
+ * @param base The I3C peripheral base address.
+ * @return Number of CM33 master IRQ entries seen while the SmartDMA data window was active.
+ */
+uint32_t I3C_MasterGetDataIrqEntryCount(I3C_Type *base);
+
+/*!
+ * @brief Returns the number of masked data-phase exits that still showed pending IRQ activity.
+ *
+ * @param base The I3C peripheral base address.
+ * @return Number of data-phase exits where pending IRQ state was observed before CM33 was re-enabled.
+ */
+uint32_t I3C_MasterGetSuppressedIrqCount(I3C_Type *base);
+
+/*!
+ * @brief Returns how many pre-disable suppressed samples also had the NVIC pending bit set.
+ *
+ * @param base The I3C peripheral base address.
+ * @return Number of pre-disable suppressed samples with the CM33 I3C NVIC pending bit asserted.
+ */
+uint32_t I3C_MasterGetSuppressedNvicPendingCount(I3C_Type *base);
+
+/*!
+ * @brief Returns the OR'd pre-disable pending interrupt mask observed while CM33 stayed masked.
+ *
+ * @param base The I3C peripheral base address.
+ * @return OR'd value of pre-disable `MINTMASKED` samples captured at masked data-phase exit.
+ */
+uint32_t I3C_MasterGetSuppressedPendingMask(I3C_Type *base);
+
+/*!
+ * @brief Returns the OR'd pre-disable raw master status register observed while CM33 stayed masked.
+ *
+ * @param base The I3C peripheral base address.
+ * @return OR'd value of pre-disable raw `MSTATUS` samples captured at masked data-phase exit.
+ */
+uint32_t I3C_MasterGetSuppressedStatusMask(I3C_Type *base);
+
+/*!
+ * @brief Clears the master IRQ entry count for this I3C instance.
+ *
+ * @param base The I3C peripheral base address.
+ */
+void I3C_MasterClearIrqEntryCount(I3C_Type *base);
+
+/*!
+ * @brief Marks whether the current transfer is in its SmartDMA data window.
+ *
+ * @param base The I3C peripheral base address.
+ * @param isActive True when the current transfer is in the SmartDMA data window.
+ */
+void I3C_MasterSetIrqDataWindowActive(I3C_Type *base, bool isActive);
+
+/*!
+ * @brief Records interrupt state observed while CM33 stayed masked.
+ *
+ * @param base The I3C peripheral base address.
+ * @param pendingMask Value read from `MINTMASKED` before disabling the data-phase interrupt source.
+ * @param statusMask Raw `MSTATUS` read before disabling the data-phase interrupt source.
+ * @param nvicPending True if the CM33 I3C NVIC line was already pending before disable.
+ */
+void I3C_MasterRecordSuppressedIrqState(I3C_Type *base,
+                                        uint32_t pendingMask,
+                                        uint32_t statusMask,
+                                        bool nvicPending);
 /*!
  * @brief Provides a default configuration for the I3C peripheral, the configuration covers both master
  * functionality and slave functionality.

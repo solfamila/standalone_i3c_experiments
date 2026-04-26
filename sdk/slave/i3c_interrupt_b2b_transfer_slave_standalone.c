@@ -7,7 +7,7 @@
 void *experiment_memset(void *ptr, int value, size_t num);
 
 #define APP_ENABLE_SEMIHOST 0
-#define EXPERIMENT_SLAVE_ECHO_COUNT_PLUS_ONE 1
+#define EXPERIMENT_SLAVE_DRAIN_RX_ON_STOP 1
 #define memset experiment_memset
 
 #include "i3c_interrupt_b2b_transfer_slave_base.c"

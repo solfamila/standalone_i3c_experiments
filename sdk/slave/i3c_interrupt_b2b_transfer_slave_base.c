@@ -525,8 +525,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
     switch ((uint32_t)xfer->event)
     {
         case kI3C_SlaveAddressMatchEvent:
-            if (g_slaveIbiIssued && (g_slaveRetainedTrace.postEchoTxPreparedCount == 0U) &&
-                ((I3C_SlaveGetStatusFlags(base) & (uint32_t)kI3C_SlaveRequiredReadFlag) != 0U))
+            if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount == 0U))
             {
                 g_slaveRetainedTrace.postIbiAddressMatchCount++;
                 g_lastTransferWasReceive = false;
@@ -618,7 +617,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                 {
                     i3c_slave_record_trace(kSlaveTraceTxComplete, g_txBuff, (uint32_t)xfer->transferredCount, 0U);
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-                    if (g_slaveIbiRequestSent)
+                    if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount != 0U))
                     {
                         g_slaveIbiRequestSent = false;
                     }
@@ -648,7 +647,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     g_slaveRetainedTrace.postEchoCompletionErrorWasReceive = g_lastTransferWasReceive ? 1U : 0U;
                 }
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-                if (g_slaveIbiRequestSent)
+                if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount != 0U))
                 {
                     g_slaveIbiRequestSent = false;
                 }

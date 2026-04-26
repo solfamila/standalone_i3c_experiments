@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 
 RUNNER := ./run_experiment.sh
-EXPERIMENTS := master_polling master_interrupt master_dma_irq_probe master_i3c_dma_irq_probe master_i3c_dma_byte_bridge master_i3c_dma_seed_chain_probe master_led_smoke
+EXPERIMENTS := master_polling master_interrupt master_dma_irq_probe master_i3c_dma_irq_probe master_i3c_dma_byte_bridge master_i3c_dma_seed_chain_probe master_i3c_dma_seed_tail_ibi_probe master_led_smoke
 
 .PHONY: help all clean $(EXPERIMENTS) clean-%
 
@@ -14,6 +14,7 @@ help:
 	  '  make master_i3c_dma_irq_probe Build, flash, run, and validate the I3C0->DMA0->SmartDMA probe' \
 	  '  make master_i3c_dma_byte_bridge Build, flash, run, and validate the one-byte I3C DMA bridge probe' \
 	  '  make master_i3c_dma_seed_chain_probe Build, flash, run, and validate the prelinked I3C DMA seed-chain probe' \
+	  '  make master_i3c_dma_seed_tail_ibi_probe Build, flash, run, and validate the seed-tail IBI compatibility probe' \
 	  '  make master_led_smoke   Build, flash, run, and validate the LED smoke test on both boards' \
 	  '  make clean               Remove all experiment _build directories' \
 	  '  make clean-master_polling    Remove only master_polling/_build' \
@@ -22,6 +23,7 @@ help:
 	  '  make clean-master_i3c_dma_irq_probe Remove only master_i3c_dma_irq_probe/_build' \
 	  '  make clean-master_i3c_dma_byte_bridge Remove only master_i3c_dma_byte_bridge/_build' \
 	  '  make clean-master_i3c_dma_seed_chain_probe Remove only master_i3c_dma_seed_chain_probe/_build' \
+	  '  make clean-master_i3c_dma_seed_tail_ibi_probe Remove only master_i3c_dma_seed_tail_ibi_probe/_build' \
 	  '  make clean-master_led_smoke Remove only master_led_smoke/_build'
 
 all: $(EXPERIMENTS)
