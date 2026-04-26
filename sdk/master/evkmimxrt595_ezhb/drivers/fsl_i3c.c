@@ -8,6 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+extern uint8_t *g_txBuff;
+extern uint32_t g_txSize;
+#endif
+
 /*******************************************************************************
  * Definitions
  ******************************************************************************/
@@ -73,6 +78,33 @@ enum _i3c_transfer_states
     kWaitForCompletionState,
 };
 
+typedef struct _i3c_slave_txready_debug
+{
+    uint32_t entryCount;
+    uint32_t usedCallback;
+    uint32_t prearmAtBusStart;
+    uint32_t prearmAtMatched;
+    uint32_t flags;
+    uint32_t pendingInts;
+    uint32_t txCountBeforeCallback;
+    uint32_t txDataSizeAtEntry;
+    uint32_t txDataNullAtEntry;
+    uint32_t txCountAfterCallback;
+    uint32_t txDataSizeAfterCallback;
+    uint32_t txDataNullAfterCallback;
+    uint32_t statusAfterCallback;
+    uint32_t errAfterCallback;
+    uint32_t writesAttempted;
+    uint32_t transferredCountAfterWrite;
+    uint32_t txDataSizeAfterWrite;
+} i3c_slave_txready_debug_t;
+
+__attribute__((section(".usb_ram"), used, aligned(4))) volatile i3c_slave_txready_debug_t g_i3cSlaveTxReadyDebug;
+
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+extern volatile bool g_slaveIbiRequestSent;
+#endif
+
 /*
  * <! Structure definition for variables that passed as parameters in I3C_RunTransferStateMachine.
  * The structure is private.
@@ -104,7 +136,8 @@ typedef struct _i3c_transfer_handleIrq_param
  * Prototypes
  ******************************************************************************/
 
-
+/* Not static so it can be used from fsl_i3c_dma.c. */
+static status_t I3C_MasterWaitForTxReady(I3C_Type *base, uint8_t byteCounts);
 /*******************************************************************************
  * Variables
  ******************************************************************************/
@@ -129,6 +162,50 @@ static const reset_ip_name_t kI3cResets[] = I3C_RSTS;
 
 static i3c_device_info_t devList[ARRAY_SIZE(kI3cBases)][I3C_MAX_DEVCNT]; /*!< I3C slave record list */
 static uint8_t usedDevCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterIrqEntryCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterControlIrqEntryCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterDataIrqEntryCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterSuppressedIrqCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterSuppressedNvicPendingCount[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterSuppressedPendingMask[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile uint32_t s_i3cMasterSuppressedStatusMask[ARRAY_SIZE(kI3cBases)] = {0};
+static volatile bool s_i3cMasterDataWindowActive[ARRAY_SIZE(kI3cBases)] = {false};
+
+typedef struct i3c_master_error_trace
+{
+    uint32_t status;
+    uint32_t errStatus;
+    uint32_t mdatactrl;
+    uint32_t state;
+    uint32_t requestedCount;
+    uint32_t transferredCount;
+    uint32_t lastByte;
+    uint32_t completed;
+    int32_t result;
+    uint32_t hitCount;
+} i3c_master_error_trace_t;
+
+volatile i3c_master_error_trace_t g_i3cMasterWaitCtrlDoneErrorTrace;
+volatile i3c_master_error_trace_t g_i3cMasterReceiveErrorTrace;
+
+static void I3C_MasterRecordErrorTrace(volatile i3c_master_error_trace_t *trace,
+                                       I3C_Type *base,
+                                       uint32_t status,
+                                       uint32_t errStatus,
+                                       uint32_t mdatactrl,
+                                       status_t result)
+{
+    trace->status = status;
+    trace->errStatus = errStatus;
+    trace->mdatactrl = mdatactrl;
+    trace->state = (uint32_t)I3C_MasterGetState(base);
+    trace->requestedCount = 0U;
+    trace->transferredCount = 0U;
+    trace->lastByte = 0U;
+    trace->completed = 0U;
+    trace->result = (int32_t)result;
+    trace->hitCount++;
+}
 
 /*! @brief Pointer to master IRQ handler for each instance. */
 i3c_master_isr_t s_i3cMasterIsr;
@@ -224,15 +301,19 @@ static void I3C_TransferStateMachineStopState(I3C_Type *base,
 static bool I3C_SlaveTransferHandleGetStatusFlags(I3C_Type *base,
                                                   i3c_slave_handle_t *handle,
                                                   i3c_slave_handleIrq_param_t *stateParams);
+
 /*!
- * @brief introduce function I3C_SlaveTransferHandleBusStart.
  * This function was deal start Bus.
  *
  * @param base The I3C peripheral base address.
  * @param xfer address to xfer.
  * @param pendingInts address to pendingInts.
  */
-static void I3C_SlaveTransferHandleBusStart(I3C_Type *base, i3c_slave_transfer_t *xfer, uint32_t *pendingInts);
+static void I3C_SlaveTransferHandleBusStart(I3C_Type *base,
+                                            i3c_slave_handle_t *handle,
+                                            i3c_slave_transfer_t *xfer,
+                                            uint32_t flags,
+                                            uint32_t *pendingInts);
 
 /*!
  * @brief introduce function I3C_SlaveTransferHandleEventSent.
@@ -274,7 +355,10 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
  * @param handle handle Pointer to #i3c_slave_handle_t structure which stores the transfer state.
  * @param xfer address to xfer.
  */
-static void I3C_SlaveTransferHandleMatched(I3C_Type *base, i3c_slave_handle_t *handle, i3c_slave_transfer_t *xfer);
+static void I3C_SlaveTransferHandleMatched(I3C_Type *base,
+                                           i3c_slave_handle_t *handle,
+                                           i3c_slave_transfer_t *xfer,
+                                           uint32_t flags);
 
 /*!
  * @brief introduce function I3C_SlaveTransferHandleTxReady.
@@ -327,6 +411,81 @@ uint32_t I3C_GetInstance(I3C_Type *base)
     assert(instance < ARRAY_SIZE(kI3cBases));
 
     return instance;
+}
+
+uint32_t I3C_MasterGetIrqEntryCount(I3C_Type *base)
+{
+    return s_i3cMasterIrqEntryCount[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetControlIrqEntryCount(I3C_Type *base)
+{
+    return s_i3cMasterControlIrqEntryCount[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetDataIrqEntryCount(I3C_Type *base)
+{
+    return s_i3cMasterDataIrqEntryCount[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetSuppressedIrqCount(I3C_Type *base)
+{
+    return s_i3cMasterSuppressedIrqCount[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetSuppressedNvicPendingCount(I3C_Type *base)
+{
+    return s_i3cMasterSuppressedNvicPendingCount[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetSuppressedPendingMask(I3C_Type *base)
+{
+    return s_i3cMasterSuppressedPendingMask[I3C_GetInstance(base)];
+}
+
+uint32_t I3C_MasterGetSuppressedStatusMask(I3C_Type *base)
+{
+    return s_i3cMasterSuppressedStatusMask[I3C_GetInstance(base)];
+}
+
+void I3C_MasterClearIrqEntryCount(I3C_Type *base)
+{
+    uint32_t instance = I3C_GetInstance(base);
+
+    s_i3cMasterIrqEntryCount[instance] = 0U;
+    s_i3cMasterControlIrqEntryCount[instance] = 0U;
+    s_i3cMasterDataIrqEntryCount[instance] = 0U;
+    s_i3cMasterSuppressedIrqCount[instance] = 0U;
+    s_i3cMasterSuppressedNvicPendingCount[instance] = 0U;
+    s_i3cMasterSuppressedPendingMask[instance] = 0U;
+    s_i3cMasterSuppressedStatusMask[instance] = 0U;
+    s_i3cMasterDataWindowActive[instance] = false;
+}
+
+void I3C_MasterSetIrqDataWindowActive(I3C_Type *base, bool isActive)
+{
+    s_i3cMasterDataWindowActive[I3C_GetInstance(base)] = isActive;
+}
+
+void I3C_MasterRecordSuppressedIrqState(I3C_Type *base,
+                                        uint32_t pendingMask,
+                                        uint32_t statusMask,
+                                        bool nvicPending)
+{
+    uint32_t instance = I3C_GetInstance(base);
+
+    if ((pendingMask != 0U) || nvicPending)
+    {
+        s_i3cMasterSuppressedIrqCount[instance]++;
+    }
+
+    if (nvicPending)
+    {
+        s_i3cMasterSuppressedNvicPendingCount[instance]++;
+    }
+
+    s_i3cMasterSuppressedPendingMask[instance] |= pendingMask;
+    s_i3cMasterSuppressedStatusMask[instance] |= statusMask;
 }
 
 /*!
@@ -435,8 +594,7 @@ status_t I3C_MasterWaitForCtrlDone(I3C_Type *base, bool waitIdle)
     {
         status    = I3C_MasterGetStatusFlags(base);
         errStatus = I3C_MasterGetErrorStatusFlags(base);
-        /* Check for error flags. */
-        result = I3C_MasterCheckAndClearError(base, errStatus);
+        uint32_t mdatactrl = base->MDATACTRL;
         /* Check if the control finishes. */
         if (0UL != (status & (uint32_t)kI3C_MasterControlDoneFlag))
         {
@@ -445,6 +603,13 @@ status_t I3C_MasterWaitForCtrlDone(I3C_Type *base, bool waitIdle)
             {
                 break;
             }
+        }
+        /* Check for error flags after honoring control-done in the non-idle case. */
+        result = I3C_MasterCheckAndClearError(base, errStatus);
+        if ((result != kStatus_Success) && (errStatus != 0UL))
+        {
+            I3C_MasterRecordErrorTrace(
+                &g_i3cMasterWaitCtrlDoneErrorTrace, base, status, errStatus, mdatactrl, result);
         }
         /* kI3C_MasterControlDoneFlag only indicates ACK got, need to wait for SDA high. */
         if (waitIdle && I3C_MasterGetState(base) == kI3C_MasterStateIdle)
@@ -463,7 +628,7 @@ status_t I3C_MasterWaitForCtrlDone(I3C_Type *base, bool waitIdle)
     return result;
 }
 
-status_t I3C_MasterWaitForTxReady(I3C_Type *base, uint8_t byteCounts)
+static status_t I3C_MasterWaitForTxReady(I3C_Type *base, uint8_t byteCounts)
 {
     uint32_t errStatus;
     status_t result;
@@ -1404,7 +1569,10 @@ status_t I3C_MasterReceive(I3C_Type *base, void *rxBuff, size_t rxSize, uint32_t
     bool isRxAutoTerm = ((flags & (uint32_t)kI3C_TransferRxAutoTermFlag) != 0UL);
     bool completed    = false;
     uint32_t status;
+    size_t rxCount;
+    size_t requestedRxSize = rxSize;
     uint8_t *buf;
+    uint8_t lastByte = 0U;
 
     assert(NULL != rxBuff);
 
@@ -1429,14 +1597,39 @@ status_t I3C_MasterReceive(I3C_Type *base, void *rxBuff, size_t rxSize, uint32_t
             return kStatus_I3C_Timeout;
         }
 #endif
-        /* Check for errors. */
-        result = I3C_MasterCheckAndClearError(base, I3C_MasterGetErrorStatusFlags(base));
-        if (kStatus_Success != result)
+        uint32_t mdatactrl = base->MDATACTRL;
+        uint32_t errStatus = I3C_MasterGetErrorStatusFlags(base);
+
+#if !defined(FSL_FEATURE_I3C_HAS_NO_MERRWARN_TERM) || (!FSL_FEATURE_I3C_HAS_NO_MERRWARN_TERM)
+        if (0UL != (errStatus & (uint32_t)kI3C_MasterErrorTermFlag))
         {
-            return result;
+            rxCount = (mdatactrl & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
+            while ((rxSize != 0UL) && (rxCount != 0UL))
+            {
+                lastByte = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
+                *buf++ = lastByte;
+                rxSize--;
+                rxCount--;
+            }
+        }
+#endif
+
+        /* Check RX data */
+        if ((0UL != rxSize) && (0UL != (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK)))
+        {
+            lastByte = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
+            *buf++ = lastByte;
+            rxSize--;
+            if ((flags & (uint32_t)kI3C_TransferDisableRxTermFlag) == 0UL)
+            {
+                if ((!isRxAutoTerm) && (rxSize == 1U))
+                {
+                    base->MCTRL |= I3C_MCTRL_RDTERM(1U);
+                }
+            }
         }
 
-        /* Check complete flag */
+        /* Check complete flag after draining any pending Rx bytes. */
         if (!completed)
         {
             status = I3C_MasterGetStatusFlags(base) & (uint32_t)kI3C_MasterCompleteFlag;
@@ -1465,18 +1658,60 @@ status_t I3C_MasterReceive(I3C_Type *base, void *rxBuff, size_t rxSize, uint32_t
             }
         }
 
-        /* Check RX data */
-        if ((0UL != rxSize) && (0UL != (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK)))
+        /* Check for errors after draining any pending Rx bytes and honoring completion. */
+        errStatus = I3C_MasterGetErrorStatusFlags(base);
+        if ((errStatus == (uint32_t)kI3C_MasterErrorNackFlag) && (rxSize != 0UL))
         {
-            *buf++ = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
-            rxSize--;
-            if ((flags & (uint32_t)kI3C_TransferDisableRxTermFlag) == 0UL)
+            uint32_t nackDrainRetries = 256U;
+
+            while (nackDrainRetries-- != 0U)
             {
-                if ((!isRxAutoTerm) && (rxSize == 1U))
+                rxCount = (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
+                while ((rxSize != 0UL) && (rxCount != 0UL))
                 {
-                    base->MCTRL |= I3C_MCTRL_RDTERM(1U);
+                    lastByte = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
+                    *buf++ = lastByte;
+                    rxSize--;
+                    rxCount--;
+                }
+
+                if (rxSize == 0UL)
+                {
+                    I3C_MasterClearErrorStatusFlags(base, errStatus);
+                    if ((flags & (uint32_t)kI3C_TransferNoStopFlag) == 0UL)
+                    {
+                        result = I3C_MasterEmitStop(base, true);
+                    }
+                    return result;
+                }
+
+                if ((I3C_MasterGetStatusFlags(base) & (uint32_t)kI3C_MasterCompleteFlag) != 0UL)
+                {
+                    completed = true;
                 }
             }
+
+            errStatus = I3C_MasterGetErrorStatusFlags(base);
+        }
+
+        result    = I3C_MasterCheckAndClearError(base, errStatus);
+        if (kStatus_Success != result)
+        {
+            if (errStatus != 0UL)
+            {
+                I3C_MasterRecordErrorTrace(
+                    &g_i3cMasterReceiveErrorTrace,
+                    base,
+                    I3C_MasterGetStatusFlags(base),
+                    errStatus,
+                    base->MDATACTRL,
+                    result);
+                g_i3cMasterReceiveErrorTrace.requestedCount = (uint32_t)requestedRxSize;
+                g_i3cMasterReceiveErrorTrace.transferredCount = (uint32_t)(requestedRxSize - rxSize);
+                g_i3cMasterReceiveErrorTrace.lastByte = (uint32_t)lastByte;
+                g_i3cMasterReceiveErrorTrace.completed = completed ? 1U : 0U;
+            }
+            return result;
         }
     }
 
@@ -2079,7 +2314,8 @@ void I3C_MasterTransferCreateHandle(I3C_Type *base,
 #endif
 
     /* Clear internal IRQ enables and enable NVIC IRQ. */
-    I3C_MasterEnableInterrupts(base, (uint32_t)kMasterIrqFlags);
+    //I3C_MasterEnableInterrupts(base, (uint32_t)kMasterIrqFlags);
+    I3C_MasterEnableInterrupts(base, (uint32_t)kI3C_MasterTxReadyFlag);
 }
 
 static void I3C_TransferStateMachineIBIWonState(I3C_Type *base,
@@ -3160,7 +3396,7 @@ void I3C_SlaveTransferCreateHandle(I3C_Type *base,
     assert(NULL != handle);
 
     /* Clear out the handle. */
-    (void)memset(handle, 0, sizeof(*handle));
+    (void)memset((void *)&g_i3cSlaveTxReadyDebug, 0, sizeof(g_i3cSlaveTxReadyDebug));
 
     /* Look up instance number */
     instance = I3C_GetInstance(base);
@@ -3320,12 +3556,36 @@ static bool I3C_SlaveTransferHandleGetStatusFlags(I3C_Type *base,
     return true;
 }
 
-static void I3C_SlaveTransferHandleBusStart(I3C_Type *base, i3c_slave_transfer_t *xfer, uint32_t *pendingInts)
+static void I3C_SlaveTransferHandleBusStart(I3C_Type *base,
+                                            i3c_slave_handle_t *handle,
+                                            i3c_slave_transfer_t *xfer,
+                                            uint32_t flags,
+                                            uint32_t *pendingInts)
 {
     base->SDATACTRL |= I3C_SDATACTRL_FLUSHTB_MASK;
-    xfer->txDataSize = 0;
+    if ((xfer->txData == NULL) || (xfer->txDataSize == 0U))
+    {
+        xfer->txDataSize = 0;
+    }
     I3C_SlaveEnableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
     (*pendingInts) |= (uint32_t)kI3C_SlaveTxReadyFlag;
+    g_i3cSlaveTxReadyDebug.prearmAtBusStart = 0U;
+
+    if ((0UL != (flags & (uint32_t)kI3C_SlaveRequiredReadFlag)) && (NULL != handle->callback)
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+        && g_slaveIbiRequestSent
+#endif
+    )
+    {
+        xfer->event = (uint32_t)kI3C_SlaveTransmitEvent;
+        if (0UL != (flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
+        {
+            xfer->event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
+        }
+        handle->callback(base, xfer, handle->userData);
+        handle->transferredCount = 0U;
+        g_i3cSlaveTxReadyDebug.prearmAtBusStart = xfer->txDataSize;
+    }
 }
 
 static void I3C_SlaveTransferHandleEventSent(I3C_Type *base, i3c_slave_handle_t *handle, i3c_slave_transfer_t *xfer)
@@ -3352,6 +3612,23 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
                                            i3c_slave_handleIrq_param_t *stateParams)
 {
     assert(NULL != base && NULL != handle && NULL != stateParams);
+
+#if defined(EXPERIMENT_SLAVE_DRAIN_RX_ON_STOP)
+    if (!handle->wasTransmit)
+    {
+        size_t lateRxCount = 0U;
+
+        I3C_SlaveGetFifoCounts(base, &lateRxCount, NULL);
+        while ((lateRxCount != 0U) && (handle->transfer.rxData != NULL) && (handle->transfer.rxDataSize != 0UL))
+        {
+            *(handle->transfer.rxData++) = (uint8_t)(base->SRDATAB & 0xFFU);
+            --(handle->transfer.rxDataSize);
+            ++(handle->transferredCount);
+            --lateRxCount;
+        }
+    }
+#endif
+
     I3C_SlaveDisableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
     stateParams->pendingInts &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
     base->SDATACTRL |= I3C_SDATACTRL_FLUSHTB_MASK | I3C_SDATACTRL_FLUSHFB_MASK;
@@ -3370,6 +3647,10 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
             --handle->transfer.transferredCount;
             handle->wasTransmit = false;
         }
+        else if (handle->rxDataBase != NULL)
+        {
+            handle->transfer.transferredCount = handle->rxDataSize - handle->transfer.rxDataSize;
+        }
 
         if ((0UL != (handle->eventMask & handle->transfer.event)) && (NULL != handle->callback))
         {
@@ -3378,17 +3659,43 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
 
         /* Clean up transfer info on completion, after the callback has been invoked. */
         (void)memset(&handle->transfer, 0, sizeof(handle->transfer));
+        handle->rxDataBase = NULL;
+        handle->rxDataSize = 0U;
     }
 }
 
-static void I3C_SlaveTransferHandleMatched(I3C_Type *base, i3c_slave_handle_t *handle, i3c_slave_transfer_t *xfer)
+static void I3C_SlaveTransferHandleMatched(I3C_Type *base,
+                                           i3c_slave_handle_t *handle,
+                                           i3c_slave_transfer_t *xfer,
+                                           uint32_t flags)
 {
     assert(NULL != base && NULL != handle && NULL != xfer);
     xfer->event    = (uint32_t)kI3C_SlaveAddressMatchEvent;
     handle->isBusy = true;
+
     if ((0UL != (handle->eventMask & (uint32_t)kI3C_SlaveAddressMatchEvent)) && (NULL != handle->callback))
     {
         handle->callback(base, xfer, handle->userData);
+        if ((xfer->txData != NULL) && (xfer->txDataSize != 0U))
+        {
+            handle->transferredCount = 0U;
+        }
+    }
+
+    g_i3cSlaveTxReadyDebug.prearmAtMatched = 0U;
+
+    /* Prime the transmit buffer on a read match so TxReady can write immediately. */
+    if ((0UL != (flags & (uint32_t)kI3C_SlaveRequiredReadFlag)) &&
+        ((NULL == xfer->txData) || (0UL == xfer->txDataSize)) && (NULL != handle->callback))
+    {
+        xfer->event = (uint32_t)kI3C_SlaveTransmitEvent;
+        if (0UL != (flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
+        {
+            xfer->event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
+        }
+        handle->callback(base, xfer, handle->userData);
+        handle->transferredCount = 0U;
+        g_i3cSlaveTxReadyDebug.prearmAtMatched = xfer->txDataSize;
     }
 }
 
@@ -3398,11 +3705,43 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
 {
     assert(NULL != base && NULL != handle && NULL != stateParams);
 
+    g_i3cSlaveTxReadyDebug.entryCount++;
+    g_i3cSlaveTxReadyDebug.usedCallback = 0U;
+    g_i3cSlaveTxReadyDebug.txDataSizeAtEntry = handle->transfer.txDataSize;
+    g_i3cSlaveTxReadyDebug.txDataNullAtEntry = (handle->transfer.txData == NULL) ? 1U : 0U;
+    g_i3cSlaveTxReadyDebug.flags = stateParams->flags;
+    g_i3cSlaveTxReadyDebug.pendingInts = stateParams->pendingInts;
+    g_i3cSlaveTxReadyDebug.txCountBeforeCallback = stateParams->txCount;
+    g_i3cSlaveTxReadyDebug.txCountAfterCallback = stateParams->txCount;
+    g_i3cSlaveTxReadyDebug.txDataSizeAfterCallback = handle->transfer.txDataSize;
+    g_i3cSlaveTxReadyDebug.txDataNullAfterCallback = (handle->transfer.txData == NULL) ? 1U : 0U;
+    g_i3cSlaveTxReadyDebug.statusAfterCallback = 0U;
+    g_i3cSlaveTxReadyDebug.errAfterCallback = 0U;
+    g_i3cSlaveTxReadyDebug.writesAttempted = 0U;
+    g_i3cSlaveTxReadyDebug.transferredCountAfterWrite = handle->transferredCount;
+    g_i3cSlaveTxReadyDebug.txDataSizeAfterWrite = handle->transfer.txDataSize;
+
     handle->wasTransmit = true;
+
+    if ((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) == 0U)
+    {
+        return;
+    }
+
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    if (((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize)) && (g_txBuff != NULL) &&
+        (g_txSize != 0U) && g_slaveIbiRequestSent)
+    {
+        handle->transfer.txData = g_txBuff;
+        handle->transfer.txDataSize = g_txSize;
+        handle->transferredCount = 0U;
+    }
+#endif
 
     /* If we're out of data, invoke callback to get more. */
     if ((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize))
     {
+        g_i3cSlaveTxReadyDebug.usedCallback = 1U;
         handle->transfer.event = (uint32_t)kI3C_SlaveTransmitEvent;
         if (0UL != (stateParams->flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
         {
@@ -3416,6 +3755,15 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
 
         /* Clear the transferred count now that we have a new buffer. */
         handle->transferredCount = 0;
+
+        /* Re-read FIFO room after the callback arms a fresh TX buffer. */
+        I3C_SlaveGetFifoCounts(base, NULL, &stateParams->txCount);
+        stateParams->txCount = handle->txFifoSize - stateParams->txCount;
+        g_i3cSlaveTxReadyDebug.txCountAfterCallback = stateParams->txCount;
+        g_i3cSlaveTxReadyDebug.txDataSizeAfterCallback = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.txDataNullAfterCallback = (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.statusAfterCallback = I3C_SlaveGetStatusFlags(base);
+        g_i3cSlaveTxReadyDebug.errAfterCallback = I3C_SlaveGetErrorStatusFlags(base);
     }
 
     if ((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize))
@@ -3428,6 +3776,7 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
     /* Transmit a byte. */
     while ((handle->transfer.txDataSize != 0UL) && ((stateParams->txCount) != 0U))
     {
+        g_i3cSlaveTxReadyDebug.writesAttempted++;
         if (handle->transfer.txDataSize > 1UL)
         {
             base->SWDATAB = *handle->transfer.txData++;
@@ -3441,6 +3790,9 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
         handle->transferredCount++;
         stateParams->txCount--;
     }
+
+    g_i3cSlaveTxReadyDebug.transferredCountAfterWrite = handle->transferredCount;
+    g_i3cSlaveTxReadyDebug.txDataSizeAfterWrite = handle->transfer.txDataSize;
 }
 
 static void I3C_SlaveTransferHandleRxReady(I3C_Type *base,
@@ -3448,6 +3800,7 @@ static void I3C_SlaveTransferHandleRxReady(I3C_Type *base,
                                            i3c_slave_handleIrq_param_t *stateParams)
 {
     assert(NULL != base && NULL != handle && NULL != stateParams);
+    handle->wasTransmit = false;
     /* If we're out of room in the buffer, invoke callback to get another. */
     if ((NULL == handle->transfer.rxData) || (0UL == handle->transfer.rxDataSize))
     {
@@ -3461,6 +3814,8 @@ static void I3C_SlaveTransferHandleRxReady(I3C_Type *base,
         {
             handle->callback(base, &handle->transfer, handle->userData);
         }
+        handle->rxDataBase = handle->transfer.rxData;
+        handle->rxDataSize = handle->transfer.rxDataSize;
         handle->transferredCount = 0;
     }
     /* Receive a byte. */
@@ -3504,7 +3859,7 @@ void I3C_SlaveTransferHandleIRQ(I3C_Type *base, void *intHandle)
 
     if (0UL != (stateParams.flags & (uint32_t)kI3C_SlaveBusStartFlag))
     {
-        I3C_SlaveTransferHandleBusStart(base, &handle->transfer, &stateParams.pendingInts);
+        I3C_SlaveTransferHandleBusStart(base, handle, &handle->transfer, stateParams.flags, &stateParams.pendingInts);
     }
 
     if (0UL != (stateParams.flags & (uint32_t)kI3C_SlaveEventSentFlag))
@@ -3519,14 +3874,13 @@ void I3C_SlaveTransferHandleIRQ(I3C_Type *base, void *intHandle)
 
     if (0UL != (stateParams.flags & (uint32_t)kI3C_SlaveMatchedFlag))
     {
-        I3C_SlaveTransferHandleMatched(base, handle, &handle->transfer);
+        I3C_SlaveTransferHandleMatched(base, handle, &handle->transfer, stateParams.flags);
     }
 
     /* Get fifo counts and compute room in tx fifo. */
     I3C_SlaveGetFifoCounts(base, &stateParams.rxCount, &stateParams.txCount);
     stateParams.txCount = handle->txFifoSize - stateParams.txCount;
 
-    /* Handle transmit and receive. */
     if ((0UL != (stateParams.flags & (uint32_t)kI3C_SlaveTxReadyFlag)) &&
         (0UL != (stateParams.pendingInts & (uint32_t)kI3C_SlaveTxReadyFlag)))
     {
@@ -3552,6 +3906,15 @@ static void I3C_CommonIRQHandler(I3C_Type *base, uint32_t instance)
     if (((uint32_t)kI3C_MasterOn == (base->MCONFIG & I3C_MCONFIG_MSTENA_MASK)) && (NULL != s_i3cMasterIsr))
     {
         /* Master mode. */
+        s_i3cMasterIrqEntryCount[instance]++;
+        if (s_i3cMasterDataWindowActive[instance])
+        {
+            s_i3cMasterDataIrqEntryCount[instance]++;
+        }
+        else
+        {
+            s_i3cMasterControlIrqEntryCount[instance]++;
+        }
         s_i3cMasterIsr(base, s_i3cMasterHandle[instance]);
     }
 

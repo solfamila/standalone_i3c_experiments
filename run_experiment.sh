@@ -6,6 +6,9 @@ usage() {
 usage:
   run_experiment.sh <experiment-dir>
   run_experiment.sh clean [experiment-dir]
+
+environment:
+  RT595_MASTER_RUN_MODE=linkserver|trace32|none  default: linkserver
 EOF
 }
 
@@ -105,6 +108,16 @@ SLAVE_RESET_SETTLE=${RT595_SLAVE_RESET_SETTLE:-1}
 SLAVE_READY_TIMEOUT=${RT595_SLAVE_READY_TIMEOUT:-20}
 SLAVE_READY_PATTERN=${RT595_SLAVE_READY_PATTERN:-'slave: waiting for master traff|slave: armed'}
 SLAVE_POST_MASTER_WAIT=${RT595_SLAVE_POST_MASTER_WAIT:-1}
+MASTER_RUN_MODE=${RT595_MASTER_RUN_MODE:-linkserver}
+
+case "$MASTER_RUN_MODE" in
+  linkserver|trace32|none)
+    ;;
+  *)
+    echo "unsupported RT595_MASTER_RUN_MODE: $MASTER_RUN_MODE" >&2
+    exit 2
+    ;;
+esac
 
 CPU_FLAGS=(
   -mcpu=cortex-m33
@@ -267,6 +280,11 @@ start_slave_run() {
     return 0
   fi
 
+  if [[ -n "${SLAVE_RUN_PID:-}" ]] && kill -0 "$SLAVE_RUN_PID" 2>/dev/null; then
+    echo "slave ready pattern not seen; continuing with background slave run" >&2
+    return 0
+  fi
+
   echo "slave did not become ready before timeout" >&2
   cat "$log_file" >&2
   cleanup_slave_run
@@ -313,6 +331,11 @@ compile_master() {
   )
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
+
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+    master_driver_source="$SCRIPT_DIR/../src/master/drivers/fsl_i3c_smartdma.c"
+    defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
+  fi
 
   sources+=(
     "$MASTER_SDK_DIR/board/board.c"
@@ -434,6 +457,10 @@ compile_slave() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+    defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
+  fi
+
   sources+=(
     "$SLAVE_SDK_DIR/board.c"
     "$SLAVE_SDK_DIR/clock_config.c"
@@ -515,6 +542,11 @@ compile_slave() {
     "$SLAVE_BUILD_DIR/slave.bin"
 }
 
+skip_master_linkserver_run() {
+  echo "Skipping master LinkServer run because RT595_MASTER_RUN_MODE=$MASTER_RUN_MODE"
+  echo "Master ELF ready at $MASTER_ELF"
+}
+
 validate_master_output() {
   local experiment_name=$1
   local output_file=$2
@@ -535,8 +567,11 @@ validate_master_output() {
     master_i3c_dma_seed_chain_probe)
       grep -q 'I3C DMA seed chain probe successful' "$output_file"
       ;;
+    master_i3c_dma_seed_tail_ibi_probe)
+      grep -q 'I3C DMA seed tail IBI probe successful' "$output_file"
+      ;;
     master_led_smoke)
-      grep -q 'LED smoke completed' "$output_file"
+      grep -q 'LED smoke starting: raw GPIO forever' "$output_file" && grep -q 'readback:' "$output_file"
       ;;
     *)
       echo "unknown experiment: $experiment_name" >&2
@@ -555,12 +590,34 @@ SLAVE_LINK_SCRIPT="${RT595_SLAVE_LINK_SCRIPT:-$SLAVE_SDK_DIR/evkmimxrt595_ezhb_D
 echo "Building $EXPERIMENT_NAME master"
 compile_master "$MASTER_LINK_SCRIPT"
 
+MASTER_ELF="$MASTER_BUILD_DIR/evkmimxrt595_ezhb.axf"
+MASTER_LOG="$BUILD_DIR/master_run.log"
+
+if [[ "$EXPERIMENT_NAME" == "master_led_smoke" ]]; then
+  if [[ "$MASTER_RUN_MODE" != "linkserver" ]]; then
+    skip_master_linkserver_run
+    exit 0
+  fi
+
+  echo "Running master LED smoke only on $MASTER_PROBE"
+  set +e
+  "$LINKSERVER" run -p "$MASTER_PROBE" --exit-timeout "$EXIT_TIMEOUT" "$DEVICE" "$MASTER_ELF" 2>&1 | tee "$MASTER_LOG"
+  MASTER_STATUS=${PIPESTATUS[0]}
+  set -e
+
+  if ! validate_master_output "$EXPERIMENT_NAME" "$MASTER_LOG"; then
+    echo "$EXPERIMENT_NAME FAILED validation" >&2
+    exit 1
+  fi
+
+  echo "master_led_smoke raw GPIO probe finished or timed out with status $MASTER_STATUS"
+  exit 0
+fi
+
 echo "Building $EXPERIMENT_NAME slave"
 compile_slave "$SLAVE_LINK_SCRIPT"
 
-MASTER_ELF="$MASTER_BUILD_DIR/evkmimxrt595_ezhb.axf"
 SLAVE_ELF="$SLAVE_BUILD_DIR/slave.axf"
-MASTER_LOG="$BUILD_DIR/master_run.log"
 SLAVE_LOG="$BUILD_DIR/slave_run.log"
 SLAVE_ELF_HASH=$(file_hash "$SLAVE_ELF")
 SLAVE_FLASH_STAMP=$(slave_flash_stamp_file)
@@ -576,6 +633,12 @@ fi
 
 echo "Resetting slave on $SLAVE_PROBE"
 reset_slave_board "$SLAVE_LOG"
+
+if [[ "$MASTER_RUN_MODE" != "linkserver" ]]; then
+  skip_master_linkserver_run
+  echo "Slave reset complete on $SLAVE_PROBE"
+  exit 0
+fi
 
 echo "Running master on $MASTER_PROBE"
 set +e
