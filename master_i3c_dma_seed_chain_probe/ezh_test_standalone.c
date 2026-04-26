@@ -22,6 +22,8 @@
 #include "board.h"
 #include "experiment_led.h"
 
+#define EXPERIMENT_ENABLE_SEMIHOST_LOG 0
+
 #define I3C_DMA_SEED_CHAIN_LENGTH 8U
 #define I3C_DMA_SEED_CHAIN_TIMEOUT 100000000U
 #define I3C_DMA_SEED_CHAIN_API_INDEX 0U
@@ -48,6 +50,7 @@ extern uint8_t __smartdma_end__[];
 
 void keep_smartdma_api_alive(void);
 
+#if EXPERIMENT_ENABLE_SEMIHOST_LOG
 static void semihost_write0(const char *message)
 {
     register unsigned int operation asm("r0") = 0x04U;
@@ -106,6 +109,10 @@ static void experiment_log(const char *level, const char *format, ...)
 
 #define EXP_LOG_INFO(...) experiment_log("INF", __VA_ARGS__)
 #define EXP_LOG_ERROR(...) experiment_log("ERR", __VA_ARGS__)
+#else
+#define EXP_LOG_INFO(...) ((void)0)
+#define EXP_LOG_ERROR(...) ((void)0)
+#endif
 
 typedef struct _dma_descriptor
 {
@@ -121,7 +128,11 @@ typedef struct _i3c_dma_seed_chain_param
     uint32_t expectedWakeCount;
     volatile uint32_t wakeCount;
     volatile uint32_t dmaSeedBytes;
+    volatile uint32_t smartdmaBytes;
     volatile uint32_t dmaIntaCount;
+    uint32_t nextTxByteAddress;
+    uint32_t remainingCount;
+    uint32_t i3cBaseAddress;
     uint32_t dmaIntaAddress;
     uint32_t dmaChannelMask;
 } i3c_dma_seed_chain_param_t;
@@ -147,7 +158,6 @@ AT_NONCACHEABLE_SECTION_ALIGN(static dma_descriptor_t s_dma_seed_chain[I3C_DMA_S
 AT_NONCACHEABLE_SECTION_ALIGN(static uint8_t s_tx_buffer[I3C_DMA_SEED_CHAIN_LENGTH], 4);
 AT_NONCACHEABLE_SECTION_ALIGN(static i3c_dma_seed_chain_param_t s_probe_param, 4);
 
-static volatile bool s_smartdma_irq_fired = false;
 static volatile uint32_t s_i3c_irq_status_latched = 0U;
 static volatile uint32_t s_cm33_i3c_irq_count = 0U;
 static volatile uint32_t s_cm33_i3c_data_irq_count = 0U;
@@ -229,12 +239,6 @@ static void end_transfer_led(bool show_completion_pulse)
     EXP_LED_Set(false, false, false);
 }
 
-static void smartdma_completion_callback(void *param)
-{
-    (void)param;
-    s_smartdma_irq_fired = true;
-}
-
 void SDMA_IRQHandler(void)
 {
     SMARTDMA_HandleIRQ();
@@ -313,13 +317,13 @@ static status_t wait_for_smartdma_completion(void)
 {
     volatile uint32_t timeout = 0U;
 
-    while ((!s_smartdma_irq_fired) && (++timeout < I3C_DMA_SEED_CHAIN_TIMEOUT))
+    while ((s_probe_param.mailbox == 0U) && (++timeout < I3C_DMA_SEED_CHAIN_TIMEOUT))
     {
         service_transfer_led();
         __NOP();
     }
 
-    if (!s_smartdma_irq_fired)
+    if (s_probe_param.mailbox == 0U)
     {
         return kStatus_Timeout;
     }
@@ -335,19 +339,11 @@ static status_t wait_for_i3c_ctrl_done(I3C_Type *base)
     {
         service_transfer_led();
         uint32_t error_status = I3C_MasterGetErrorStatusFlags(base);
-        uint32_t latched_status = s_i3c_irq_status_latched;
 
-        if ((error_status != 0U) || ((latched_status & (uint32_t)kI3C_MasterErrorFlag) != 0U))
+        if (error_status != 0U)
         {
             I3C_MasterClearErrorStatusFlags(base, error_status);
-            s_i3c_irq_status_latched &= ~((uint32_t)kI3C_MasterErrorFlag);
             return kStatus_Fail;
-        }
-
-        if ((latched_status & (uint32_t)kI3C_MasterControlDoneFlag) != 0U)
-        {
-            s_i3c_irq_status_latched &= ~((uint32_t)kI3C_MasterControlDoneFlag);
-            return kStatus_Success;
         }
 
         if ((I3C_MasterGetStatusFlags(base) & (uint32_t)kI3C_MasterControlDoneFlag) != 0U)
@@ -368,19 +364,11 @@ static status_t wait_for_i3c_complete(I3C_Type *base)
     {
         service_transfer_led();
         uint32_t error_status = I3C_MasterGetErrorStatusFlags(base);
-        uint32_t latched_status = s_i3c_irq_status_latched;
 
-        if ((error_status != 0U) || ((latched_status & (uint32_t)kI3C_MasterErrorFlag) != 0U))
+        if (error_status != 0U)
         {
             I3C_MasterClearErrorStatusFlags(base, error_status);
-            s_i3c_irq_status_latched &= ~((uint32_t)kI3C_MasterErrorFlag);
             return kStatus_Fail;
-        }
-
-        if ((latched_status & (uint32_t)kI3C_MasterCompleteFlag) != 0U)
-        {
-            s_i3c_irq_status_latched &= ~((uint32_t)kI3C_MasterCompleteFlag);
-            return kStatus_Success;
         }
 
         if ((I3C_MasterGetStatusFlags(base) & (uint32_t)kI3C_MasterCompleteFlag) != 0U)
@@ -466,9 +454,7 @@ static void configure_dma_seed_chain(I3C_Type *base)
     const uint32_t one_byte_xfercfg_base = DMA_CHANNEL_XFERCFG_CFGVALID(1U) | DMA_CHANNEL_XFERCFG_SETINTA(1U) |
                                            DMA_CHANNEL_XFERCFG_WIDTH(0U) | DMA_CHANNEL_XFERCFG_SRCINC(1U) |
                                            DMA_CHANNEL_XFERCFG_DSTINC(0U) | DMA_CHANNEL_XFERCFG_XFERCOUNT(0U);
-    dma_descriptor_t *descriptor = NULL;
-    dma_descriptor_t *next_descriptor = NULL;
-    uint32_t descriptor_index;
+    dma_descriptor_t *bootstrap_descriptor = &s_dma_descriptor_table[I3C_DMA_TX_CHANNEL];
 
     CLOCK_EnableClock(kCLOCK_Dmac0);
     RESET_PeripheralReset(kDMAC0_RST_SHIFT_RSTn);
@@ -482,33 +468,16 @@ static void configure_dma_seed_chain(I3C_Type *base)
     DMA0->COMMON[0].INTENSET = channel_mask;
     DMA0->COMMON[0].ENABLESET = channel_mask;
 
-    for (descriptor_index = 0U; descriptor_index < I3C_DMA_SEED_CHAIN_LENGTH; descriptor_index++)
-    {
-        bool has_next = (descriptor_index + 1U) < I3C_DMA_SEED_CHAIN_LENGTH;
-        uint32_t xfercfg = one_byte_xfercfg_base | (has_next ? DMA_CHANNEL_XFERCFG_RELOAD(1U) : 0U);
-
-        descriptor = (descriptor_index == 0U) ? &s_dma_descriptor_table[I3C_DMA_TX_CHANNEL] :
-                                                &s_dma_seed_chain[descriptor_index - 1U];
-
-        if (has_next)
-        {
-            next_descriptor = (descriptor_index == 0U) ? &s_dma_seed_chain[0] : &s_dma_seed_chain[descriptor_index];
-        }
-        else
-        {
-            next_descriptor = NULL;
-        }
-
-        descriptor->xfercfg = xfercfg;
-        descriptor->srcEndAddr = &s_tx_buffer[descriptor_index];
-        descriptor->dstEndAddr = (void *)((descriptor_index + 1U < I3C_DMA_SEED_CHAIN_LENGTH) ?
-                                              (uintptr_t)&base->MWDATAB :
-                                              (uintptr_t)&base->MWDATABE);
-        descriptor->linkToNextDesc = next_descriptor;
-    }
+    bootstrap_descriptor->xfercfg = one_byte_xfercfg_base;
+    bootstrap_descriptor->srcEndAddr = &s_tx_buffer[0];
+    bootstrap_descriptor->dstEndAddr = (void *)&base->MWDATAB;
+    bootstrap_descriptor->linkToNextDesc = NULL;
 
     memset((void *)&s_probe_param, 0, sizeof(s_probe_param));
-    s_probe_param.expectedWakeCount = I3C_DMA_SEED_CHAIN_LENGTH;
+    s_probe_param.expectedWakeCount = 1U;
+    s_probe_param.nextTxByteAddress = (uint32_t)(uintptr_t)&s_tx_buffer[1U];
+    s_probe_param.remainingCount = I3C_DMA_SEED_CHAIN_LENGTH - 1U;
+    s_probe_param.i3cBaseAddress = (uint32_t)(uintptr_t)base;
     s_probe_param.dmaIntaAddress = (uint32_t)(uintptr_t)&DMA0->COMMON[0].INTA;
     s_probe_param.dmaChannelMask = channel_mask;
 }
@@ -523,6 +492,7 @@ static void arm_seed_chain(void)
 static void dump_probe_counters(void)
 {
     EXP_LOG_INFO("dma_seed_bytes=%lu", (unsigned long)s_probe_param.dmaSeedBytes);
+    EXP_LOG_INFO("smartdma_bytes=%lu", (unsigned long)s_probe_param.smartdmaBytes);
     EXP_LOG_INFO("dma0_inta_count=%lu", (unsigned long)s_probe_param.dmaIntaCount);
     EXP_LOG_INFO("smartdma_wake_count=%lu", (unsigned long)s_probe_param.wakeCount);
     EXP_LOG_INFO("cm33_i3c_irq_count=%lu", (unsigned long)s_cm33_i3c_irq_count);
@@ -530,6 +500,7 @@ static void dump_probe_counters(void)
     EXP_LOG_INFO("cm33_i3c_protocol_irq_count=%lu", (unsigned long)s_cm33_i3c_protocol_irq_count);
 
     PRINTF("dma_seed_bytes=%lu\r\n", (unsigned long)s_probe_param.dmaSeedBytes);
+    PRINTF("smartdma_bytes=%lu\r\n", (unsigned long)s_probe_param.smartdmaBytes);
     PRINTF("dma0_inta_count=%lu\r\n", (unsigned long)s_probe_param.dmaIntaCount);
     PRINTF("smartdma_wake_count=%lu\r\n", (unsigned long)s_probe_param.wakeCount);
     PRINTF("cm33_i3c_irq_count=%lu\r\n", (unsigned long)s_cm33_i3c_irq_count);
@@ -580,15 +551,20 @@ static void dump_debug_state(I3C_Type *base)
 static status_t run_i3c_dma_seed_chain_probe(I3C_Type *base, uint8_t slaveAddr)
 {
     status_t result = kStatus_Success;
+    size_t tx_fifo_size = 2UL << ((base->SCAPABILITIES & I3C_SCAPABILITIES_FIFOTX_MASK) >> I3C_SCAPABILITIES_FIFOTX_SHIFT);
     uint8_t saved_tx_trigger_level = (uint8_t)((base->MDATACTRL & I3C_MDATACTRL_TXTRIG_MASK) >> I3C_MDATACTRL_TXTRIG_SHIFT);
     uint8_t saved_rx_trigger_level = (uint8_t)((base->MDATACTRL & I3C_MDATACTRL_RXTRIG_MASK) >> I3C_MDATACTRL_RXTRIG_SHIFT);
 
-    s_smartdma_irq_fired = false;
     s_i3c_irq_status_latched = 0U;
     s_cm33_i3c_irq_count = 0U;
     s_cm33_i3c_data_irq_count = 0U;
     s_cm33_i3c_protocol_irq_count = 0U;
     memset(&s_failure_snapshot, 0, sizeof(s_failure_snapshot));
+
+    if (tx_fifo_size < I3C_DMA_SEED_CHAIN_LENGTH)
+    {
+        return kStatus_Fail;
+    }
 
     configure_dma_seed_chain(base);
 
@@ -612,20 +588,16 @@ static status_t run_i3c_dma_seed_chain_probe(I3C_Type *base, uint8_t slaveAddr)
 
     NVIC_DisableIRQ(DMA0_IRQn);
     NVIC_ClearPendingIRQ(DMA0_IRQn);
+    NVIC_DisableIRQ(I3C0_IRQn);
     NVIC_ClearPendingIRQ(I3C0_IRQn);
-    NVIC_SetPriority(I3C0_IRQn, 3);
-    NVIC_EnableIRQ(I3C0_IRQn);
 
     SMARTDMA_Init(
         SMARTDMA_SRAM_ADDR, __smartdma_start__, (uint32_t)((uintptr_t)__smartdma_end__ - (uintptr_t)__smartdma_start__));
-    SMARTDMA_InstallCallback(smartdma_completion_callback, NULL);
     NVIC_ClearPendingIRQ(SDMA_IRQn);
-    NVIC_SetPriority(SDMA_IRQn, 3);
-    NVIC_EnableIRQ(SDMA_IRQn);
+    NVIC_DisableIRQ(SDMA_IRQn);
     SMARTDMA_Reset();
     SMARTDMA_Boot(I3C_DMA_SEED_CHAIN_API_INDEX, &s_probe_param, 0);
 
-    I3C_MasterEnableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
     I3C_MasterEnableDMA(base, true, false, 1U);
     arm_seed_chain();
     begin_transfer_led();
@@ -665,7 +637,6 @@ exit:
     }
 
     I3C_MasterEnableDMA(base, false, false, 1U);
-    I3C_MasterDisableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
     I3C_MasterSetWatermarks(base,
                             (i3c_tx_trigger_level_t)saved_tx_trigger_level,
                             (i3c_rx_trigger_level_t)saved_rx_trigger_level,
@@ -752,29 +723,37 @@ int main(void)
         return -1;
     }
 
-    if (s_probe_param.dmaSeedBytes != s_probe_param.expectedWakeCount)
+    if (s_probe_param.dmaSeedBytes != 1U)
     {
-        EXP_LOG_ERROR("DMA seed byte mismatch: expected=%lu actual=%lu",
-                      (unsigned long)s_probe_param.expectedWakeCount,
+        EXP_LOG_ERROR("DMA seed byte mismatch: expected=1 actual=%lu",
                       (unsigned long)s_probe_param.dmaSeedBytes);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;
     }
 
-    if (s_probe_param.dmaIntaCount != s_probe_param.expectedWakeCount)
+    if (s_probe_param.smartdmaBytes != (I3C_DMA_SEED_CHAIN_LENGTH - 1U))
     {
-        EXP_LOG_ERROR("DMA INTA count mismatch: expected=%lu actual=%lu",
-                      (unsigned long)s_probe_param.expectedWakeCount,
+        EXP_LOG_ERROR("SmartDMA tail byte mismatch: expected=%u actual=%lu",
+                      I3C_DMA_SEED_CHAIN_LENGTH - 1U,
+                      (unsigned long)s_probe_param.smartdmaBytes);
+        dump_debug_state(EXAMPLE_MASTER);
+        set_failure_led();
+        return -1;
+    }
+
+    if (s_probe_param.dmaIntaCount != 1U)
+    {
+        EXP_LOG_ERROR("DMA INTA count mismatch: expected=1 actual=%lu",
                       (unsigned long)s_probe_param.dmaIntaCount);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;
     }
 
-    if (s_probe_param.wakeCount <= 1U)
+    if (s_cm33_i3c_irq_count != 0U)
     {
-        EXP_LOG_ERROR("Expected more than one SmartDMA wake.");
+        EXP_LOG_ERROR("Unexpected CM33 I3C IRQ count: %lu", (unsigned long)s_cm33_i3c_irq_count);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;
@@ -788,9 +767,9 @@ int main(void)
         return -1;
     }
 
-    if (s_cm33_i3c_protocol_irq_count == 0U)
+    if (s_cm33_i3c_protocol_irq_count != 0U)
     {
-        EXP_LOG_ERROR("Expected protocol IRQs to remain visible on CM33.");
+        EXP_LOG_ERROR("Unexpected CM33 I3C protocol IRQ count: %lu", (unsigned long)s_cm33_i3c_protocol_irq_count);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;
