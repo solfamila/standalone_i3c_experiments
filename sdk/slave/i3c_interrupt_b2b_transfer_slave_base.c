@@ -80,7 +80,7 @@ enum
 };
 
 #define SLAVE_RETAINED_TRACE_MAGIC 0x53545243U
-#define SLAVE_RETAINED_TRACE_VERSION 5U
+#define SLAVE_RETAINED_TRACE_VERSION 6U
 
 enum
 {
@@ -149,6 +149,20 @@ typedef struct slave_retained_trace
     uint32_t lastAddressMatchServedPostIbiEcho;
     uint32_t lastTransmitServedPostIbiEcho;
     uint32_t lastPostIbiEchoServeSource;
+    uint32_t currentGeneration;
+    uint32_t currentEchoedCount;
+    uint32_t currentIbiDelayLoops;
+    uint32_t currentIbiPending;
+    uint32_t currentIbiIssued;
+    uint32_t currentIbiRequestSent;
+    uint32_t currentPostIbiAddressMatched;
+    uint32_t currentPostIbiEchoPending;
+    uint32_t lastQueuedGeneration;
+    uint32_t lastIssuedGeneration;
+    uint32_t lastRequestSentGeneration;
+    uint32_t lastAddressMatchGeneration;
+    uint32_t lastTransmitServeGeneration;
+    uint32_t lastTxCompletionGeneration;
 } slave_retained_trace_t;
 
 #if APP_ENABLE_SEMIHOST
@@ -351,6 +365,8 @@ static void i3c_slave_service_activity_led(void)
 /*******************************************************************************
  * Code
  ******************************************************************************/
+static void i3c_slave_update_retained_ibi_state(void);
+
 static void i3c_slave_reset_retained_trace(void)
 {
     volatile uint32_t *traceWords = (volatile uint32_t *)&g_slaveRetainedTrace;
@@ -395,6 +411,8 @@ static void i3c_slave_rearm_after_invalid_start(uint32_t eventMask)
     g_slaveIbiDelayLoops = 0U;
     g_txBuff = g_slave_txBuff;
     g_txSize = I3C_SLAVE_TX_DATA_LENGTH;
+    g_slaveRetainedTrace.currentEchoedCount = 0U;
+    i3c_slave_update_retained_ibi_state();
 
     I3C_SlaveTransferAbort(EXAMPLE_SLAVE, &g_i3c_s_handle);
     I3C_SlaveClearErrorStatusFlags(EXAMPLE_SLAVE, I3C_SlaveGetErrorStatusFlags(EXAMPLE_SLAVE));
@@ -585,6 +603,16 @@ static void i3c_slave_buildTxBuff(uint8_t *regAddr, uint8_t **txBuff, uint32_t *
     }
 }
 
+static void i3c_slave_update_retained_ibi_state(void)
+{
+    g_slaveRetainedTrace.currentIbiDelayLoops = g_slaveIbiDelayLoops;
+    g_slaveRetainedTrace.currentIbiPending = g_slaveIbiPending ? 1U : 0U;
+    g_slaveRetainedTrace.currentIbiIssued = g_slaveIbiIssued ? 1U : 0U;
+    g_slaveRetainedTrace.currentIbiRequestSent = g_slaveIbiRequestSent ? 1U : 0U;
+    g_slaveRetainedTrace.currentPostIbiAddressMatched = g_slavePostIbiAddressMatched ? 1U : 0U;
+    g_slaveRetainedTrace.currentPostIbiEchoPending = g_slavePostIbiEchoPending ? 1U : 0U;
+}
+
 static bool i3c_slave_has_post_ibi_echo(void)
 {
     return g_slavePostIbiEchoPending && !g_slavePostIbiEchoConsumed && (g_txBuff != NULL) && (g_txSize != 0U);
@@ -608,12 +636,16 @@ static void i3c_slave_arm_post_ibi_echo(i3c_slave_transfer_t *xfer, uint32_t sou
     {
         g_slaveRetainedTrace.postIbiEchoAddressMatchServeCount++;
         g_slaveRetainedTrace.lastAddressMatchServedPostIbiEcho = 1U;
+        g_slaveRetainedTrace.lastAddressMatchGeneration = g_slaveRetainedTrace.currentGeneration;
     }
     else if (source == kSlavePostIbiEchoSourceTransmitEvent)
     {
         g_slaveRetainedTrace.postIbiEchoTransmitServeCount++;
         g_slaveRetainedTrace.lastTransmitServedPostIbiEcho = 1U;
+        g_slaveRetainedTrace.lastTransmitServeGeneration = g_slaveRetainedTrace.currentGeneration;
     }
+
+    i3c_slave_update_retained_ibi_state();
 }
 
 static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void *userData)
@@ -753,7 +785,9 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
 
         case kI3C_SlaveCompletionEvent:
             i3c_slave_complete_activity_led();
-            if (xfer->completionStatus == kStatus_Success)
+            if ((xfer->completionStatus == kStatus_Success) ||
+                ((!g_lastTransferWasReceive) && g_slavePostIbiEchoPending &&
+                 ((uint32_t)xfer->transferredCount != 0U) && (xfer->completionStatus == kStatus_I3C_Term)))
             {
                 if (g_lastTransferWasReceive)
                 {
@@ -777,18 +811,20 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     g_txSize = echoedCount;
                     g_slavePostIbiEchoPending = (echoedCount != 0U);
                     g_slavePostIbiEchoConsumed = false;
+                    g_slaveRetainedTrace.currentGeneration++;
+                    g_slaveRetainedTrace.currentEchoedCount = echoedCount;
                     i3c_slave_record_trace(kSlaveTraceEchoArmed, g_txBuff, g_txSize, 0U);
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
                     g_slaveIbiPayload[0] = (uint8_t)echoedCount;
-                    if (!g_slaveIbiRequestSent)
-                    {
-                        g_slaveIbiPending = true;
-                        g_slaveIbiRequestSent = false;
-                        g_slavePostIbiAddressMatched = false;
-                        g_slaveIbiDelayLoops = I3C_SLAVE_IBI_POST_STOP_DELAY_LOOPS;
-                        i3c_slave_record_trace(
-                            kSlaveTraceIbiQueued, NULL, g_slaveRetainedTrace.ibiQueuedCount + 1U, 0U);
-                    }
+                    g_slaveIbiPending = true;
+                    g_slaveIbiIssued = false;
+                    g_slaveIbiRequestSent = false;
+                    g_slavePostIbiAddressMatched = false;
+                    g_slaveIbiDelayLoops = I3C_SLAVE_IBI_POST_STOP_DELAY_LOOPS;
+                    g_slaveRetainedTrace.lastQueuedGeneration = g_slaveRetainedTrace.currentGeneration;
+                    i3c_slave_update_retained_ibi_state();
+                    i3c_slave_record_trace(
+                        kSlaveTraceIbiQueued, NULL, g_slaveRetainedTrace.ibiQueuedCount + 1U, 0U);
 #endif
                 }
                 else
@@ -797,12 +833,14 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     if (g_slavePostIbiEchoPending && ((uint32_t)xfer->transferredCount != 0U))
                     {
                         g_slaveRetainedTrace.postIbiEchoTxCompletionCount++;
+                        g_slaveRetainedTrace.lastTxCompletionGeneration = g_slaveRetainedTrace.currentGeneration;
                         g_slavePostIbiEchoConsumed = true;
                         g_slavePostIbiEchoPending = false;
                         g_slaveIbiPending = false;
                         g_slaveIbiIssued = false;
                         g_slaveIbiRequestSent = false;
                         g_slavePostIbiAddressMatched = false;
+                        i3c_slave_update_retained_ibi_state();
                     }
                     if (((g_slaveRetainedTrace.eventFlags & kSlaveRetainedTraceEchoArmedSeen) != 0U) &&
                         (g_slaveRetainedTrace.postEchoTxCompletionCount == 0U))
@@ -854,6 +892,8 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             g_slaveIbiPending = false;
             g_slaveIbiRequestSent = true;
             g_slavePostIbiAddressMatched = false;
+            g_slaveRetainedTrace.lastRequestSentGeneration = g_slaveRetainedTrace.currentGeneration;
+            i3c_slave_update_retained_ibi_state();
             i3c_slave_record_trace(kSlaveTraceIbiRequestSent,
                                    NULL,
                                    g_slaveRetainedTrace.ibiRequestSentCount + 1U,
@@ -938,6 +978,8 @@ int main(void)
     g_slavePostIbiEchoPending = false;
     g_slavePostIbiEchoConsumed = false;
     g_slaveIbiDelayLoops = 0U;
+    g_slaveRetainedTrace.currentEchoedCount = 0U;
+    i3c_slave_update_retained_ibi_state();
     I3C_SlaveTransferNonBlocking(EXAMPLE_SLAVE, &g_i3c_s_handle, eventMask);
 #ifdef ENABLE_PRINTF
     PRINTF("slave: armed\r\n");
@@ -966,6 +1008,7 @@ int main(void)
             if (g_slaveIbiDelayLoops != 0U)
             {
                 g_slaveIbiDelayLoops--;
+                g_slaveRetainedTrace.currentIbiDelayLoops = g_slaveIbiDelayLoops;
             }
             else
             {
@@ -980,6 +1023,8 @@ int main(void)
                                        I3C_SlaveGetStatusFlags(EXAMPLE_SLAVE));
                 g_slaveIbiIssued = true;
                 g_slaveIbiDelayLoops = 1U;
+                g_slaveRetainedTrace.lastIssuedGeneration = g_slaveRetainedTrace.currentGeneration;
+                i3c_slave_update_retained_ibi_state();
             }
         }
 #endif

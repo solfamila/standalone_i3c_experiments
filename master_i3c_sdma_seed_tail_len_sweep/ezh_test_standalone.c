@@ -94,6 +94,7 @@ static void roundtrip_read_complete_callback(I3C_Type *base,
                                              status_t status,
                                              void *userData);
 static void dump_debug_state(I3C_Type *base);
+static status_t finalize_post_ibi_bus(I3C_Type *base);
 static status_t ensure_master_idle(I3C_Type *base);
 
 #if EXPERIMENT_ENABLE_SEMIHOST_LOG
@@ -468,6 +469,10 @@ static __NO_INIT volatile uint32_t s_post_ibi_start_post_mstatus;
 static __NO_INIT volatile int32_t s_post_ibi_ctrl_done_result;
 static __NO_INIT volatile uint32_t s_post_ibi_ctrl_done_state;
 static __NO_INIT volatile uint32_t s_post_ibi_ctrl_done_mstatus;
+static __NO_INIT volatile uint32_t s_protocol_trace_count;
+static __NO_INIT volatile uint32_t s_protocol_trace_pending[4];
+static __NO_INIT volatile uint32_t s_protocol_trace_state[4];
+static __NO_INIT volatile uint32_t s_protocol_trace_mstatus[4];
 static __NO_INIT volatile uint32_t s_chunk_validate_reason;
 static __NO_INIT volatile uint32_t s_chunk_validate_value0;
 static __NO_INIT volatile uint32_t s_chunk_validate_value1;
@@ -614,6 +619,28 @@ static void clear_roundtrip_read_snapshot(void)
 static void clear_post_ibi_handoff_snapshot(void)
 {
     memset(&s_post_ibi_handoff_snapshot, 0, sizeof(s_post_ibi_handoff_snapshot));
+}
+
+static void clear_protocol_trace(void)
+{
+    s_protocol_trace_count = 0U;
+    memset((void *)s_protocol_trace_pending, 0, sizeof(s_protocol_trace_pending));
+    memset((void *)s_protocol_trace_state, 0, sizeof(s_protocol_trace_state));
+    memset((void *)s_protocol_trace_mstatus, 0, sizeof(s_protocol_trace_mstatus));
+}
+
+static void capture_protocol_trace(I3C_Type *base, uint32_t pending, i3c_master_state_t masterState)
+{
+    uint32_t index = s_protocol_trace_count;
+
+    if (index < ARRAY_SIZE(s_protocol_trace_pending))
+    {
+        s_protocol_trace_pending[index] = pending;
+        s_protocol_trace_state[index] = (uint32_t)masterState;
+        s_protocol_trace_mstatus[index] = base->MSTATUS;
+    }
+
+    s_protocol_trace_count = index + 1U;
 }
 
 static void clear_daa_setup_snapshot(void)
@@ -826,6 +853,7 @@ void I3C0_IRQHandler(void)
     if ((pending & ~((uint32_t)kI3C_MasterTxReadyFlag | (uint32_t)kI3C_MasterRxReadyFlag)) != 0U)
     {
         s_cm33_i3c_protocol_irq_count++;
+        capture_protocol_trace(EXAMPLE_MASTER, pending, masterState);
     }
 
     if (s_roundtrip_read_active)
@@ -1210,6 +1238,7 @@ static status_t wait_for_master_idle(I3C_Type *base)
     while (++timeout < I3C_DMA_SEED_CHAIN_TIMEOUT)
     {
         uint32_t error_status = I3C_MasterGetErrorStatusFlags(base);
+        i3c_master_state_t masterState = I3C_MasterGetState(base);
 
         service_transfer_led();
 
@@ -1220,9 +1249,19 @@ static status_t wait_for_master_idle(I3C_Type *base)
             return kStatus_Fail;
         }
 
-        if ((I3C_MasterGetState(base) == kI3C_MasterStateIdle) && I3C_MasterGetBusIdleState(base))
+        if ((masterState == kI3C_MasterStateIdle) && I3C_MasterGetBusIdleState(base))
         {
             return kStatus_Success;
+        }
+
+        if (masterState == kI3C_MasterStateSlvReq)
+        {
+            status_t result = finalize_post_ibi_bus(base);
+
+            if (result != kStatus_Success)
+            {
+                return result;
+            }
         }
     }
 
@@ -1982,6 +2021,8 @@ static status_t run_i3c_one_byte_cpu_write_ibi_probe(I3C_Type *base, uint8_t sla
     }
     s_one_byte_probe_stage = ONE_BYTE_PROBE_STAGE_STOP_CTRL_DONE;
 
+    clear_protocol_trace();
+
     result = wait_for_ibi_notification(base);
     if (result != kStatus_Success)
     {
@@ -2329,7 +2370,7 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
                                    (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
                                    (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
     base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
-    base->MCTRL = (base->MCTRL & ~I3C_MCTRL_IBIRESP_MASK) | I3C_MCTRL_IBIRESP(kI3C_IbiRespAckMandatory);
+    base->MCTRL = (base->MCTRL & ~I3C_MCTRL_IBIRESP_MASK) | I3C_MCTRL_IBIRESP(kI3C_IbiRespNack);
     I3C_MasterSetWatermarks(base,
                             kI3C_TxTriggerOnEmpty,
                             (i3c_rx_trigger_level_t)saved_rx_trigger_level,
@@ -2346,7 +2387,6 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
     NVIC_ClearPendingIRQ(DMA0_IRQn);
     NVIC_ClearPendingIRQ(I3C0_IRQn);
     NVIC_SetPriority(I3C0_IRQn, 3);
-    NVIC_EnableIRQ(I3C0_IRQn);
 
     SMARTDMA_Init(
         SMARTDMA_SRAM_ADDR, __smartdma_start__, (uint32_t)((uintptr_t)__smartdma_end__ - (uintptr_t)__smartdma_start__));
@@ -2355,9 +2395,6 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
     SMARTDMA_Reset();
     SMARTDMA_Boot(I3C_DMA_SEED_CHAIN_API_INDEX, &s_probe_param, 0);
 
-    I3C_MasterEnableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
-    I3C_MasterEnableDMA(base, true, false, 1U);
-    arm_seed_chain();
     begin_transfer_led();
 
     result = ensure_master_idle(base);
@@ -2365,6 +2402,12 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
     {
         goto exit;
     }
+
+    NVIC_ClearPendingIRQ(I3C0_IRQn);
+    NVIC_EnableIRQ(I3C0_IRQn);
+    I3C_MasterEnableInterrupts(base, I3C_PROTOCOL_IRQ_MASK);
+    I3C_MasterEnableDMA(base, true, false, 1U);
+    arm_seed_chain();
 
     result = I3C_MasterStart(base, kI3C_TypeI3CSdr, slaveAddr, kI3C_Write);
     if (result != kStatus_Success)
@@ -2408,12 +2451,15 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
     }
     s_dma_probe_stage = DMA_PROBE_STAGE_STOP_CTRL_DONE;
 
+    base->MCTRL = (base->MCTRL & ~I3C_MCTRL_IBIRESP_MASK) | I3C_MCTRL_IBIRESP(kI3C_IbiRespAckMandatory);
+
     I3C_MasterClearErrorStatusFlags(base, I3C_MasterGetErrorStatusFlags(base));
     I3C_MasterClearStatusFlags(base,
                                (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
                                    (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
                                    (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
     s_i3c_irq_status_latched = 0U;
+    clear_protocol_trace();
 
     result = wait_for_ibi_notification(base);
     if (result != kStatus_Success)
