@@ -444,7 +444,7 @@ compile_master() {
     defines+=("${extra_master_defines[@]}")
   fi
 
-  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     master_driver_source="$SCRIPT_DIR/../src/master/drivers/fsl_i3c_smartdma.c"
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
   fi
@@ -569,11 +569,11 @@ compile_slave() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
-  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
   fi
 
-  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" ]]; then
     defines+=(EXPERIMENT_SKIP_SLAVE_BOOT_LED_TEST=1)
   fi
 
@@ -690,6 +690,9 @@ validate_master_output() {
     master_i3c_dma_seed_tail_ibi_probe)
       grep -q 'I3C DMA seed tail IBI probe successful' "$output_file"
       ;;
+    master_i3c_sdma_seed_tail_len_sweep)
+      grep -q 'I3C SDMA seed tail length sweep successful' "$output_file"
+      ;;
     master_led_smoke)
       grep -q 'LED smoke starting: raw GPIO forever' "$output_file" && grep -q 'readback:' "$output_file"
       ;;
@@ -754,7 +757,7 @@ fi
 reset_master_board_quiet
 
 USE_LIVE_SLAVE_RUN=0
-if [[ ( "$MASTER_RUN_MODE" == "linkserver" && "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ) || "${RT595_SLAVE_LIVE_RUN:-0}" == 1 ]]; then
+if [[ ( "$MASTER_RUN_MODE" == "linkserver" && ( "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" ) ) || "${RT595_SLAVE_LIVE_RUN:-0}" == 1 ]]; then
   USE_LIVE_SLAVE_RUN=1
 fi
 
