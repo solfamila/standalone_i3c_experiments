@@ -58,7 +58,7 @@ void SMARTDMA_CODE EZHB_I3cDmaSeedChainProbe(void)
     E_DCD(wait_dma_irq);
     E_DCD(fill_tail_bytes);
     E_DCD(signal_completion);
-    E_DCD(end);
+    E_DCD(complete_mailbox);
 
     E_LDR(R5, R7, 0);
     E_COND_GOTO_REGL(EU, R5);
@@ -88,7 +88,7 @@ E_LABEL("wait_dma_irq");
     E_LDR(R2, R6, PARAM_I3C_BASE_ADDRESS_INDEX);
 
     E_SUB_IMMS(R5, R1, 0);
-    E_LDR(R5, R7, 1);
+    E_LDR(R5, R7, 3);
     E_COND_GOTO_REGL(ZE, R5);
 
 E_LABEL("fill_tail_bytes");
@@ -134,9 +134,6 @@ E_LABEL("complete_mailbox");
     E_LDR(R5, R6, PARAM_MAILBOX_INDEX);
     E_ADD_IMM(R5, R5, 1);
     E_STR(R6, R5, PARAM_MAILBOX_INDEX);
-
-    E_LDR(R5, R7, 3);
-    E_COND_GOTO_REGL(EU, R5);
 
 E_LABEL("end");
     E_NOP;

@@ -569,6 +569,11 @@ compile_slave() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
+  if [[ -n "${RT595_EXTRA_SLAVE_DEFINES:-}" ]]; then
+    read -r -a extra_slave_defines <<<"${RT595_EXTRA_SLAVE_DEFINES}"
+    defines+=("${extra_slave_defines[@]}")
+  fi
+
   if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
   fi

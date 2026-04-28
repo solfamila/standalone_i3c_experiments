@@ -572,8 +572,10 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
     switch ((uint32_t)xfer->event)
     {
         case kI3C_SlaveAddressMatchEvent:
-            if (g_slaveIbiRequestSent)
+            if (g_slaveIbiIssued || g_slaveIbiRequestSent)
             {
+                g_slaveIbiPending = false;
+                g_slaveIbiDelayLoops = 0U;
                 g_slavePostIbiAddressMatched = true;
                 g_slaveRetainedTrace.postIbiAddressMatchCount++;
                 if ((xfer->txData == NULL) || (xfer->txDataSize == 0U))
@@ -694,6 +696,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     g_txSize = echoedCount;
                     i3c_slave_record_trace(kSlaveTraceEchoArmed, g_txBuff, g_txSize, 0U);
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
+                    g_slaveIbiPayload[0] = (uint8_t)echoedCount;
                     if (!g_slaveIbiRequestSent)
                     {
                         g_slaveIbiPending = true;
@@ -755,6 +758,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             break;
 
         case kI3C_SlaveRequestSentEvent:
+            g_slaveIbiPending = false;
             g_slaveIbiRequestSent = true;
             g_slavePostIbiAddressMatched = false;
             i3c_slave_record_trace(kSlaveTraceIbiRequestSent,
@@ -862,7 +866,7 @@ int main(void)
         }
 
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-        if (g_slaveIbiPending && !g_slaveIbiIssued)
+        if (g_slaveIbiPending && !g_slaveIbiRequestSent)
         {
             if (g_slaveIbiDelayLoops != 0U)
             {
@@ -870,6 +874,9 @@ int main(void)
             }
             else
             {
+                /* The request API only arms EVENT; keep retrying until the
+                 * controller reports RequestSentEvent.
+                 */
                 g_slaveRetainedTrace.ibiStatusBeforeRequest = I3C_SlaveGetStatusFlags(EXAMPLE_SLAVE);
                 I3C_SlaveRequestIBIWithData(EXAMPLE_SLAVE, g_slaveIbiPayload, 1U);
                 i3c_slave_record_trace(kSlaveTraceIbiIssued,
@@ -877,7 +884,7 @@ int main(void)
                                        g_slaveRetainedTrace.ibiIssuedCount + 1U,
                                        I3C_SlaveGetStatusFlags(EXAMPLE_SLAVE));
                 g_slaveIbiIssued = true;
-                g_slaveIbiPending = false;
+                g_slaveIbiDelayLoops = 1U;
             }
         }
 #endif
