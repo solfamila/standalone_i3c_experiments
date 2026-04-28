@@ -309,6 +309,7 @@ typedef struct _length_sweep_snapshot
 #define ROUNDTRIP_STAGE_ERROR_SMARTDMA_START 0x104U
 #define ROUNDTRIP_STAGE_ERROR_SMARTDMA_WAIT 0x105U
 #define ROUNDTRIP_STAGE_ERROR_BLOCKING 0x106U
+#define ROUNDTRIP_STAGE_ERROR_COMPLETE_NO_DATA 0x107U
 #define POST_IBI_HANDOFF_STAGE_BEFORE_FINALIZE 1U
 #define POST_IBI_HANDOFF_STAGE_AFTER_FINALIZE 2U
 #define POST_IBI_HANDOFF_STAGE_BEFORE_READ_START 3U
@@ -355,6 +356,7 @@ typedef struct _length_sweep_snapshot
 #define POST_IBI_MANUAL_READ_STAGE_DRAIN_LOOP 4U
 #define POST_IBI_MANUAL_READ_STAGE_STOP_SENT 5U
 #define POST_IBI_MANUAL_READ_STAGE_EXIT 6U
+#define POST_IBI_MANUAL_READ_STAGE_COMPLETE_NO_DATA 7U
 
 typedef enum _length_sweep_chunk_mode
 {
@@ -1512,6 +1514,7 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
     {
         uint32_t rxCount = (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
         uint32_t errStatus;
+        uint32_t statusFlags;
 
         s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_DRAIN_LOOP;
         s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
@@ -1530,6 +1533,8 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
             I3C_MasterGetErrorStatusFlags(base),
             (uint32_t)remaining);
 
+        statusFlags = I3C_MasterGetStatusFlags(base);
+
         if (remaining == 0U)
         {
             result = I3C_MasterStop(base);
@@ -1540,6 +1545,18 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
             {
                 result = kStatus_Success;
             }
+            goto exit;
+        }
+
+        if (((statusFlags & ((uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterNackDetectFlag)) ==
+             ((uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterNackDetectFlag)) &&
+            (rxCount == 0U))
+        {
+            s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_COMPLETE_NO_DATA;
+            s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
+            capture_post_ibi_manual_read_probe(
+                base, POST_IBI_MANUAL_READ_STAGE_COMPLETE_NO_DATA, remaining, rxCount);
+            result = kStatus_I3C_Nak;
             goto exit;
         }
 

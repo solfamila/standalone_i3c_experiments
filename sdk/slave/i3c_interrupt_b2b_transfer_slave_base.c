@@ -80,7 +80,14 @@ enum
 };
 
 #define SLAVE_RETAINED_TRACE_MAGIC 0x53545243U
-#define SLAVE_RETAINED_TRACE_VERSION 4U
+#define SLAVE_RETAINED_TRACE_VERSION 5U
+
+enum
+{
+    kSlavePostIbiEchoSourceNone = 0U,
+    kSlavePostIbiEchoSourceAddressMatch = 1U,
+    kSlavePostIbiEchoSourceTransmitEvent = 2U,
+};
 
 enum
 {
@@ -136,6 +143,12 @@ typedef struct slave_retained_trace
     uint32_t lastTransmitFirstByte;
     uint32_t lastTransmitTxSizeAfter;
     uint32_t lastTransmitTxDataIsNull;
+    uint32_t postIbiEchoAddressMatchServeCount;
+    uint32_t postIbiEchoTransmitServeCount;
+    uint32_t postIbiEchoTxCompletionCount;
+    uint32_t lastAddressMatchServedPostIbiEcho;
+    uint32_t lastTransmitServedPostIbiEcho;
+    uint32_t lastPostIbiEchoServeSource;
 } slave_retained_trace_t;
 
 #if APP_ENABLE_SEMIHOST
@@ -577,7 +590,7 @@ static bool i3c_slave_has_post_ibi_echo(void)
     return g_slavePostIbiEchoPending && !g_slavePostIbiEchoConsumed && (g_txBuff != NULL) && (g_txSize != 0U);
 }
 
-static void i3c_slave_arm_post_ibi_echo(i3c_slave_transfer_t *xfer)
+static void i3c_slave_arm_post_ibi_echo(i3c_slave_transfer_t *xfer, uint32_t source)
 {
     xfer->txData = g_txBuff;
     xfer->txDataSize = g_txSize;
@@ -589,6 +602,18 @@ static void i3c_slave_arm_post_ibi_echo(i3c_slave_transfer_t *xfer)
     g_slaveRetainedTrace.postIbiAddressMatchTxSize = (uint32_t)xfer->txDataSize;
     g_slaveRetainedTrace.lastTransmitTxSizeAfter = (uint32_t)xfer->txDataSize;
     g_slaveRetainedTrace.lastTransmitTxDataIsNull = (xfer->txData == NULL) ? 1U : 0U;
+    g_slaveRetainedTrace.lastPostIbiEchoServeSource = source;
+
+    if (source == kSlavePostIbiEchoSourceAddressMatch)
+    {
+        g_slaveRetainedTrace.postIbiEchoAddressMatchServeCount++;
+        g_slaveRetainedTrace.lastAddressMatchServedPostIbiEcho = 1U;
+    }
+    else if (source == kSlavePostIbiEchoSourceTransmitEvent)
+    {
+        g_slaveRetainedTrace.postIbiEchoTransmitServeCount++;
+        g_slaveRetainedTrace.lastTransmitServedPostIbiEcho = 1U;
+    }
 }
 
 static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void *userData)
@@ -599,10 +624,11 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
     switch ((uint32_t)xfer->event)
     {
         case kI3C_SlaveAddressMatchEvent:
+            g_slaveRetainedTrace.lastAddressMatchServedPostIbiEcho = 0U;
             if (i3c_slave_has_post_ibi_echo())
             {
                 g_slaveRetainedTrace.postIbiAddressMatchCount++;
-                i3c_slave_arm_post_ibi_echo(xfer);
+                i3c_slave_arm_post_ibi_echo(xfer, kSlavePostIbiEchoSourceAddressMatch);
 #ifdef ENABLE_PRINTF
                 PRINTF("slave: post-ibi address match txsize=%lu first=0x%02x\r\n",
                        (unsigned long)xfer->txDataSize,
@@ -623,11 +649,12 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                 ((g_txBuff != NULL) && (g_txSize != 0U)) ? g_txBuff[0] : 0xEEU;
             g_slaveRetainedTrace.lastTransmitTxSizeAfter = 0U;
             g_slaveRetainedTrace.lastTransmitTxDataIsNull = 1U;
+            g_slaveRetainedTrace.lastTransmitServedPostIbiEcho = 0U;
 
 #if EXPERIMENT_FORCE_ECHO_ON_ANY_TRANSMIT
             if (i3c_slave_has_post_ibi_echo())
             {
-                i3c_slave_arm_post_ibi_echo(xfer);
+                i3c_slave_arm_post_ibi_echo(xfer, kSlavePostIbiEchoSourceTransmitEvent);
                 if (g_slaveRetainedTrace.txPreparedCount == 0U)
                 {
                     g_slaveRetainedTrace.txPreparedCount = (uint32_t)xfer->txDataSize;
@@ -644,7 +671,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
 
             if (i3c_slave_has_post_ibi_echo())
             {
-                i3c_slave_arm_post_ibi_echo(xfer);
+                i3c_slave_arm_post_ibi_echo(xfer, kSlavePostIbiEchoSourceTransmitEvent);
                 if (g_slaveRetainedTrace.txPreparedCount == 0U)
                 {
                     g_slaveRetainedTrace.txPreparedCount = (uint32_t)xfer->txDataSize;
@@ -769,6 +796,7 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     i3c_slave_record_trace(kSlaveTraceTxComplete, g_txBuff, (uint32_t)xfer->transferredCount, 0U);
                     if (g_slavePostIbiEchoPending && ((uint32_t)xfer->transferredCount != 0U))
                     {
+                        g_slaveRetainedTrace.postIbiEchoTxCompletionCount++;
                         g_slavePostIbiEchoConsumed = true;
                         g_slavePostIbiEchoPending = false;
                         g_slaveIbiPending = false;
