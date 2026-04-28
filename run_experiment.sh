@@ -410,6 +410,7 @@ compile_master() {
   local obj
   local -a includes
   local -a defines
+  local -a extra_master_defines=()
   local -a cflags=("${COMMON_CFLAGS[@]}")
   local -a objects=()
   local -a sources=()
@@ -438,6 +439,10 @@ compile_master() {
   )
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
+  if [[ -n "${RT595_EXTRA_MASTER_DEFINES:-}" ]]; then
+    read -r -a extra_master_defines <<<"${RT595_EXTRA_MASTER_DEFINES}"
+    defines+=("${extra_master_defines[@]}")
+  fi
 
   if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     master_driver_source="$SCRIPT_DIR/../src/master/drivers/fsl_i3c_smartdma.c"

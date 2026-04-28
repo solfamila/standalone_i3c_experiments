@@ -42,8 +42,23 @@
 #define I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT 2U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
 #define I3C_DMA_SEED_TAIL_IBI_PRE_READ_DELAY_US 50000U
-#define EXPERIMENT_POST_IBI_MANUAL_READ 1
-#define EXPERIMENT_POST_IBI_BLOCKING_READ 0
+#define EXPERIMENT_POST_IBI_READ_MODE_MANUAL 0U
+#define EXPERIMENT_POST_IBI_READ_MODE_BLOCKING 1U
+#define EXPERIMENT_POST_IBI_READ_MODE_SMARTDMA 2U
+
+/* Keep the validated manual path as the default. The blocking variant is
+ * available for exploratory runs by switching this mode.
+ */
+#ifndef EXPERIMENT_POST_IBI_READ_MODE
+#define EXPERIMENT_POST_IBI_READ_MODE EXPERIMENT_POST_IBI_READ_MODE_MANUAL
+#endif
+
+#if (EXPERIMENT_POST_IBI_READ_MODE != EXPERIMENT_POST_IBI_READ_MODE_MANUAL) && \
+    (EXPERIMENT_POST_IBI_READ_MODE != EXPERIMENT_POST_IBI_READ_MODE_BLOCKING) && \
+    (EXPERIMENT_POST_IBI_READ_MODE != EXPERIMENT_POST_IBI_READ_MODE_SMARTDMA)
+#error "Unsupported EXPERIMENT_POST_IBI_READ_MODE"
+#endif
+
 #define I3C_DMA_SEED_TAIL_IBI_PAYLOAD_BYTE 0xA5U
 #define I3C_DMA_SEED_TAIL_IBI_MAX_PAYLOAD 8U
 #define I3C_BROADCAST_ADDR 0x7EU
@@ -1258,7 +1273,7 @@ static status_t wait_for_post_ibi_read_ctrl_done(I3C_Type *base)
     return kStatus_Timeout;
 }
 
-#if EXPERIMENT_POST_IBI_MANUAL_READ
+#if (EXPERIMENT_POST_IBI_READ_MODE == EXPERIMENT_POST_IBI_READ_MODE_MANUAL)
 static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
 {
     static const uint32_t clear_flags = (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
@@ -1352,7 +1367,7 @@ exit:
 }
 #endif
 
-#if EXPERIMENT_POST_IBI_BLOCKING_READ
+#if (EXPERIMENT_POST_IBI_READ_MODE == EXPERIMENT_POST_IBI_READ_MODE_BLOCKING)
 static status_t read_roundtrip_payload_blocking(I3C_Type *base, uint8_t slaveAddr)
 {
     i3c_master_transfer_t masterXfer;
@@ -1398,7 +1413,7 @@ static status_t run_roundtrip_read(I3C_Type *base, uint8_t slaveAddr)
 
     memset(s_rx_buffer, 0, sizeof(s_rx_buffer));
 
-#if EXPERIMENT_POST_IBI_MANUAL_READ
+#if (EXPERIMENT_POST_IBI_READ_MODE == EXPERIMENT_POST_IBI_READ_MODE_MANUAL)
     clear_roundtrip_read_snapshot();
     result = read_roundtrip_payload_manual(base, slaveAddr);
     capture_roundtrip_read_snapshot(base, result);
@@ -1412,7 +1427,7 @@ static status_t run_roundtrip_read(I3C_Type *base, uint8_t slaveAddr)
     return result;
 #endif
 
-#if EXPERIMENT_POST_IBI_BLOCKING_READ
+#if (EXPERIMENT_POST_IBI_READ_MODE == EXPERIMENT_POST_IBI_READ_MODE_BLOCKING)
     clear_roundtrip_read_snapshot();
     result = read_roundtrip_payload_blocking(base, slaveAddr);
     capture_roundtrip_read_snapshot(base, result);
@@ -1425,6 +1440,7 @@ static status_t run_roundtrip_read(I3C_Type *base, uint8_t slaveAddr)
 
     return result;
 #endif
+
     clear_roundtrip_read_snapshot();
     prepare_roundtrip_read_controller(base);
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_SMARTDMA_PREPARED;
