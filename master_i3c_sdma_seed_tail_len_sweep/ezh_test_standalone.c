@@ -2370,7 +2370,6 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
                                    (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
                                    (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
     base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
-    base->MCTRL = (base->MCTRL & ~I3C_MCTRL_IBIRESP_MASK) | I3C_MCTRL_IBIRESP(kI3C_IbiRespNack);
     I3C_MasterSetWatermarks(base,
                             kI3C_TxTriggerOnEmpty,
                             (i3c_rx_trigger_level_t)saved_rx_trigger_level,
@@ -2402,6 +2401,8 @@ static status_t run_i3c_dma_seed_tail_ibi_probe(I3C_Type *base, uint8_t slaveAdd
     {
         goto exit;
     }
+
+    base->MCTRL = (base->MCTRL & ~I3C_MCTRL_IBIRESP_MASK) | I3C_MCTRL_IBIRESP(kI3C_IbiRespNack);
 
     NVIC_ClearPendingIRQ(I3C0_IRQn);
     NVIC_EnableIRQ(I3C0_IRQn);
