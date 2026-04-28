@@ -28,31 +28,58 @@ static void smoke_log(const char *message)
     semihost_write0(message);
 }
 
-static void show_raw_levels(uint8_t red, uint8_t green, uint8_t blue, uint32_t delay_us, const char *label)
+static void crude_delay(void)
 {
-    char message[96];
+    for (volatile uint32_t index = 0U; index < 20000000U; index++)
+    {
+        __NOP();
+    }
+}
 
-    EXP_LED_RawLevels(red, green, blue);
-    (void)snprintf(message, sizeof(message), "%s\n", label);
+static void dump_led_gpio(const char *label)
+{
+    char message[192];
+    const uint32_t red = GPIO_PinRead(GPIO, EXP_LED_RED_PORT, EXP_LED_RED_PIN);
+    const uint32_t green = GPIO_PinRead(GPIO, EXP_LED_GREEN_PORT, EXP_LED_GREEN_PIN);
+    const uint32_t blue = GPIO_PinRead(GPIO, EXP_LED_BLUE_PORT, EXP_LED_BLUE_PIN);
+    const uint32_t port0 = GPIO_PortRead(GPIO, 0U);
+    const uint32_t port1 = GPIO_PortRead(GPIO, 1U);
+    const uint32_t port3 = GPIO_PortRead(GPIO, 3U);
+
+    (void)snprintf(message,
+                   sizeof(message),
+                   "%s readback: R=%lu G=%lu B=%lu P0=0x%08lx P1=0x%08lx P3=0x%08lx\n",
+                   label,
+                   (unsigned long)red,
+                   (unsigned long)green,
+                   (unsigned long)blue,
+                   (unsigned long)port0,
+                   (unsigned long)port1,
+                   (unsigned long)port3);
     smoke_log(message);
-    SDK_DelayAtLeastUs(delay_us, SystemCoreClock);
+}
+
+static void show_raw_levels(uint8_t red, uint8_t green, uint8_t blue, const char *label)
+{
+    EXP_LED_RawLevels(red, green, blue);
+    smoke_log(label);
+    smoke_log("\n");
+    dump_led_gpio(label);
+    crude_delay();
 }
 
 int main(void)
 {
     BOARD_InitHardware();
     EXP_LED_Init();
-    smoke_log("LED smoke starting\n");
+    smoke_log("LED smoke starting: raw GPIO forever\n");
 
-    show_raw_levels(0U, 0U, 0U, 700000U, "raw 000: expected off");
-    show_raw_levels(1U, 0U, 0U, 700000U, "raw 100: expected red");
-    show_raw_levels(0U, 1U, 0U, 700000U, "raw 010: expected green");
-    show_raw_levels(0U, 0U, 1U, 700000U, "raw 001: expected blue");
-    show_raw_levels(1U, 1U, 1U, 700000U, "raw 111: expected white");
-
-    smoke_log("logical final green\n");
-    EXP_LED_Set(false, true, false);
-    SDK_DelayAtLeastUs(2000000U, SystemCoreClock);
-    smoke_log("LED smoke completed: steady green\n");
-    return 0;
+    for (;;)
+    {
+        show_raw_levels(1U, 1U, 1U, "raw 111");
+        show_raw_levels(0U, 1U, 1U, "raw 011");
+        show_raw_levels(1U, 0U, 1U, "raw 101");
+        show_raw_levels(1U, 1U, 0U, "raw 110");
+        show_raw_levels(0U, 0U, 0U, "raw 000");
+    }
 }

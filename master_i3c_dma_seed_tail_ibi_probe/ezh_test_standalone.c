@@ -42,9 +42,15 @@
 #define I3C_DMA_SEED_CHAIN_LED_VISIBLE_PULSE_COUNT 2U
 #define SMART_DMA_TRIGGER_CHANNEL 0U
 #define I3C_DMA_SEED_TAIL_IBI_PRE_READ_DELAY_US 50000U
-#define EXPERIMENT_POST_IBI_MANUAL_READ 0
+#define EXPERIMENT_POST_IBI_MANUAL_READ 1
+#define EXPERIMENT_POST_IBI_BLOCKING_READ 0
 #define I3C_DMA_SEED_TAIL_IBI_PAYLOAD_BYTE 0xA5U
 #define I3C_DMA_SEED_TAIL_IBI_MAX_PAYLOAD 8U
+#define I3C_BROADCAST_ADDR 0x7EU
+#define I3C_CCC_RSTDAA 0x06U
+#define I3C_CCC_SETDASA 0x87U
+#define I3C_TARGET_STATIC_ADDR 0x1EU
+#define I3C_TARGET_DYNAMIC_ADDR 0x30U
 
 #define I3C_PROTOCOL_IRQ_MASK ((uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag | \
                                (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag | \
@@ -220,8 +226,42 @@ typedef struct _post_ibi_handoff_snapshot
     post_ibi_handoff_sample_t beforeReadStart;
 } post_ibi_handoff_snapshot_t;
 
+typedef struct _post_ibi_read_trace_window
+{
+    uint32_t beginCount;
+    uint32_t endCount;
+    uint32_t mode;
+    uint32_t stage;
+    int32_t result;
+    uint32_t remaining;
+} post_ibi_read_trace_window_t;
+
+typedef struct _post_ibi_drain_probe
+{
+    uint32_t beginCount;
+    uint32_t endCount;
+    uint32_t rxCount;
+    uint32_t errStatus;
+    uint32_t remaining;
+} post_ibi_drain_probe_t;
+
+typedef struct _daa_setup_snapshot
+{
+    uint32_t magic;
+    uint32_t stage;
+    uint32_t attempt;
+    int32_t rstdaaResult;
+    int32_t daaResult;
+    uint32_t devCount;
+    uint32_t matchedDynamicAddr;
+    uint32_t status;
+    uint32_t errStatus;
+    uint32_t mdatactrl;
+} daa_setup_snapshot_t;
+
 #define ROUNDTRIP_READ_SNAPSHOT_MAGIC 0x52524453U
 #define POST_IBI_HANDOFF_SNAPSHOT_MAGIC 0x50494248U
+#define DAA_SETUP_SNAPSHOT_MAGIC 0x44414153U
 #define ROUNDTRIP_STAGE_CLEARED 1U
 #define ROUNDTRIP_STAGE_START_ISSUED 2U
 #define ROUNDTRIP_STAGE_CTRL_DONE 3U
@@ -230,14 +270,29 @@ typedef struct _post_ibi_handoff_snapshot
 #define ROUNDTRIP_STAGE_SMARTDMA_PREPARED 6U
 #define ROUNDTRIP_STAGE_SMARTDMA_STARTED 7U
 #define ROUNDTRIP_STAGE_SMARTDMA_COMPLETED 8U
+#define ROUNDTRIP_STAGE_BLOCKING_COMPLETED 9U
 #define ROUNDTRIP_STAGE_ERROR_START 0x101U
 #define ROUNDTRIP_STAGE_ERROR_CTRL_DONE 0x102U
 #define ROUNDTRIP_STAGE_ERROR_LOOP 0x103U
 #define ROUNDTRIP_STAGE_ERROR_SMARTDMA_START 0x104U
 #define ROUNDTRIP_STAGE_ERROR_SMARTDMA_WAIT 0x105U
+#define ROUNDTRIP_STAGE_ERROR_BLOCKING 0x106U
 #define POST_IBI_HANDOFF_STAGE_BEFORE_FINALIZE 1U
 #define POST_IBI_HANDOFF_STAGE_AFTER_FINALIZE 2U
 #define POST_IBI_HANDOFF_STAGE_BEFORE_READ_START 3U
+#define DAA_SETUP_STAGE_CLEARED 1U
+#define DAA_SETUP_STAGE_RSTDAA_ATTEMPT 2U
+#define DAA_SETUP_STAGE_RSTDAA_OK 3U
+#define DAA_SETUP_STAGE_DAA_OK 4U
+#define DAA_SETUP_STAGE_TARGET_FOUND 5U
+#define DAA_SETUP_STAGE_SETDASA_ATTEMPT 6U
+#define DAA_SETUP_STAGE_SETDASA_CCC_OK 7U
+#define DAA_SETUP_STAGE_SETDASA_DIRECT_OK 8U
+#define DAA_SETUP_STAGE_ERROR_RSTDAA 0x101U
+#define DAA_SETUP_STAGE_ERROR_DAA 0x102U
+#define DAA_SETUP_STAGE_ERROR_NO_TARGET 0x103U
+#define DAA_SETUP_STAGE_ERROR_SETDASA_CCC 0x104U
+#define DAA_SETUP_STAGE_ERROR_SETDASA_DIRECT 0x105U
 
 AT_NONCACHEABLE_SECTION_ALIGN(static dma_descriptor_t s_dma_descriptor_table[FSL_FEATURE_DMA_MAX_CHANNELS],
                               FSL_FEATURE_DMA_DESCRIPTOR_ALIGN_SIZE);
@@ -273,6 +328,9 @@ static uint8_t s_roundtrip_read_ibi_buffer[I3C_DMA_SEED_TAIL_IBI_MAX_PAYLOAD];
 static seed_chain_failure_snapshot_t s_failure_snapshot;
 static __NO_INIT roundtrip_read_snapshot_t s_roundtrip_read_snapshot;
 static __NO_INIT post_ibi_handoff_snapshot_t s_post_ibi_handoff_snapshot;
+static __NO_INIT volatile post_ibi_read_trace_window_t s_post_ibi_read_trace_window;
+static __NO_INIT volatile post_ibi_drain_probe_t s_post_ibi_drain_probe;
+static __NO_INIT daa_setup_snapshot_t s_daa_setup_snapshot;
 static bool s_transfer_led_active = false;
 static uint32_t s_transfer_led_poll_count = 0U;
 static uint32_t s_transfer_led_toggle_count = 0U;
@@ -399,6 +457,72 @@ static void clear_roundtrip_read_snapshot(void)
 static void clear_post_ibi_handoff_snapshot(void)
 {
     memset(&s_post_ibi_handoff_snapshot, 0, sizeof(s_post_ibi_handoff_snapshot));
+}
+
+static void clear_daa_setup_snapshot(void)
+{
+    memset(&s_daa_setup_snapshot, 0, sizeof(s_daa_setup_snapshot));
+}
+
+static void capture_daa_setup_snapshot(I3C_Type *base,
+                                       uint32_t stage,
+                                       uint32_t attempt,
+                                       status_t rstdaaResult,
+                                       status_t daaResult,
+                                       uint32_t devCount,
+                                       uint32_t matchedDynamicAddr)
+{
+    s_daa_setup_snapshot.magic = DAA_SETUP_SNAPSHOT_MAGIC;
+    s_daa_setup_snapshot.stage = stage;
+    s_daa_setup_snapshot.attempt = attempt;
+    s_daa_setup_snapshot.rstdaaResult = (int32_t)rstdaaResult;
+    s_daa_setup_snapshot.daaResult = (int32_t)daaResult;
+    s_daa_setup_snapshot.devCount = devCount;
+    s_daa_setup_snapshot.matchedDynamicAddr = matchedDynamicAddr;
+    s_daa_setup_snapshot.status = I3C_MasterGetStatusFlags(base);
+    s_daa_setup_snapshot.errStatus = I3C_MasterGetErrorStatusFlags(base);
+    s_daa_setup_snapshot.mdatactrl = base->MDATACTRL;
+}
+
+__attribute__((noinline, used)) void trace_post_ibi_read_window_begin(uint32_t mode)
+{
+    s_post_ibi_read_trace_window.beginCount++;
+    s_post_ibi_read_trace_window.mode = mode;
+    s_post_ibi_read_trace_window.stage = 0U;
+    s_post_ibi_read_trace_window.result = 0;
+    s_post_ibi_read_trace_window.remaining = 0U;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_post_ibi_read_window_end(uint32_t stage,
+                                                                    status_t result,
+                                                                    uint32_t remaining)
+{
+    s_post_ibi_read_trace_window.endCount++;
+    s_post_ibi_read_trace_window.stage = stage;
+    s_post_ibi_read_trace_window.result = (int32_t)result;
+    s_post_ibi_read_trace_window.remaining = remaining;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_post_ibi_drain_probe_begin(uint32_t rxCount, uint32_t remaining)
+{
+    s_post_ibi_drain_probe.beginCount++;
+    s_post_ibi_drain_probe.rxCount = rxCount;
+    s_post_ibi_drain_probe.errStatus = 0U;
+    s_post_ibi_drain_probe.remaining = remaining;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_post_ibi_drain_probe_end(uint32_t rxCount,
+                                                                     uint32_t errStatus,
+                                                                     uint32_t remaining)
+{
+    s_post_ibi_drain_probe.endCount++;
+    s_post_ibi_drain_probe.rxCount = rxCount;
+    s_post_ibi_drain_probe.errStatus = errStatus;
+    s_post_ibi_drain_probe.remaining = remaining;
+    __asm volatile("" ::: "memory");
 }
 
 static void capture_post_ibi_handoff_sample(post_ibi_handoff_sample_t *sample,
@@ -632,6 +756,30 @@ static void prepare_roundtrip_read_controller(I3C_Type *base)
 
     SMARTDMA_Reset();
     I3C_MasterTransferCreateHandleSmartDMA(base, &s_roundtrip_read_handle, &s_roundtrip_read_callbacks, NULL);
+    NVIC_ClearPendingIRQ(I3C0_IRQn);
+    NVIC_ClearPendingIRQ(SDMA_IRQn);
+}
+
+static void prepare_roundtrip_read_cpu_controller(I3C_Type *base)
+{
+    clear_dma0_channel_state();
+    I3C_MasterEnableDMA(base, false, false, 1U);
+
+    RESET_PeripheralReset(kINPUTMUX_RST_SHIFT_RSTn);
+    INPUTMUX_Init(INPUTMUX);
+    INPUTMUX_EnableSignal(INPUTMUX, kINPUTMUX_I3c0TxToDmac0Ch25RequestEna, false);
+    INPUTMUX_Deinit(INPUTMUX);
+
+    NVIC_ClearPendingIRQ(I3C0_IRQn);
+    NVIC_ClearPendingIRQ(SDMA_IRQn);
+    NVIC_DisableIRQ(SDMA_IRQn);
+
+    memset(&s_roundtrip_read_handle, 0, sizeof(s_roundtrip_read_handle));
+    memset(s_roundtrip_read_ibi_buffer, 0, sizeof(s_roundtrip_read_ibi_buffer));
+    s_roundtrip_read_active = false;
+    s_roundtrip_read_complete = false;
+    s_roundtrip_read_ibi_won = false;
+    s_roundtrip_read_status = kStatus_Success;
 }
 
 static status_t wait_for_roundtrip_read_completion(void)
@@ -766,23 +914,116 @@ static status_t wait_for_i3c_complete(I3C_Type *base)
     return kStatus_Timeout;
 }
 
+static status_t run_cpu_setdasa_fallback(I3C_Type *base, uint8_t *slaveAddr, status_t rstdaaResult, uint32_t attempt)
+{
+    i3c_master_transfer_t masterXfer;
+    status_t setdasaResult;
+
+    EXP_LOG_INFO("Falling back to SETDASA using static address 0x%x.", I3C_TARGET_STATIC_ADDR);
+
+    memset(&masterXfer, 0, sizeof(masterXfer));
+    masterXfer.slaveAddress = I3C_BROADCAST_ADDR;
+    masterXfer.subaddress = I3C_CCC_SETDASA;
+    masterXfer.subaddressSize = 1U;
+    masterXfer.direction = kI3C_Write;
+    masterXfer.busType = kI3C_TypeI3CSdr;
+    masterXfer.flags = kI3C_TransferNoStopFlag;
+    masterXfer.ibiResponse = kI3C_IbiRespAckMandatory;
+
+    I3C_MasterClearErrorStatusFlags(base, I3C_MasterGetErrorStatusFlags(base));
+    I3C_MasterClearStatusFlags(base,
+                               (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
+                                   (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
+                                   (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
+    base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
+
+    capture_daa_setup_snapshot(base,
+                               DAA_SETUP_STAGE_SETDASA_ATTEMPT,
+                               attempt,
+                               rstdaaResult,
+                               kStatus_Success,
+                               0U,
+                               0U);
+
+    setdasaResult = I3C_MasterTransferBlocking(base, &masterXfer);
+    if (setdasaResult != kStatus_Success)
+    {
+        capture_daa_setup_snapshot(base,
+                                   DAA_SETUP_STAGE_ERROR_SETDASA_CCC,
+                                   attempt,
+                                   rstdaaResult,
+                                   setdasaResult,
+                                   0U,
+                                   0U);
+        EXP_LOG_ERROR("SETDASA CCC failed: %d", setdasaResult);
+        return setdasaResult;
+    }
+
+    capture_daa_setup_snapshot(base,
+                               DAA_SETUP_STAGE_SETDASA_CCC_OK,
+                               attempt,
+                               rstdaaResult,
+                               setdasaResult,
+                               0U,
+                               0U);
+
+    memset(&masterXfer, 0, sizeof(masterXfer));
+    masterXfer.slaveAddress = I3C_TARGET_STATIC_ADDR;
+    masterXfer.subaddress = (uint32_t)(I3C_TARGET_DYNAMIC_ADDR << 1U);
+    masterXfer.subaddressSize = 1U;
+    masterXfer.direction = kI3C_Write;
+    masterXfer.busType = kI3C_TypeI3CSdr;
+    masterXfer.flags = kI3C_TransferDefaultFlag;
+    masterXfer.ibiResponse = kI3C_IbiRespAckMandatory;
+
+    setdasaResult = I3C_MasterTransferBlocking(base, &masterXfer);
+    if (setdasaResult != kStatus_Success)
+    {
+        capture_daa_setup_snapshot(base,
+                                   DAA_SETUP_STAGE_ERROR_SETDASA_DIRECT,
+                                   attempt,
+                                   rstdaaResult,
+                                   setdasaResult,
+                                   0U,
+                                   0U);
+        EXP_LOG_ERROR("SETDASA address transfer failed: %d", setdasaResult);
+        return setdasaResult;
+    }
+
+    *slaveAddr = I3C_TARGET_DYNAMIC_ADDR;
+    capture_daa_setup_snapshot(base,
+                               DAA_SETUP_STAGE_SETDASA_DIRECT_OK,
+                               attempt,
+                               rstdaaResult,
+                               setdasaResult,
+                               1U,
+                               *slaveAddr);
+    EXP_LOG_INFO("SETDASA assigned dynamic address 0x%x.", *slaveAddr);
+
+    return kStatus_Success;
+}
+
 static status_t run_cpu_rstdaa_and_daa(I3C_Type *base, uint8_t *slaveAddr)
 {
     i3c_master_transfer_t masterXfer;
     uint8_t addressList[8] = {0x30U, 0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U};
     uint8_t devCount = 0U;
     i3c_device_info_t *devList;
-    status_t result;
+    status_t rstdaaResult = kStatus_Success;
+    status_t daaResult = kStatus_Success;
     uint32_t attempt;
 
     memset(&masterXfer, 0, sizeof(masterXfer));
-    masterXfer.slaveAddress = 0x7EU;
-    masterXfer.subaddress = 0x06U;
+    masterXfer.slaveAddress = I3C_BROADCAST_ADDR;
+    masterXfer.subaddress = I3C_CCC_RSTDAA;
     masterXfer.subaddressSize = 1U;
     masterXfer.direction = kI3C_Write;
     masterXfer.busType = kI3C_TypeI3CSdr;
     masterXfer.flags = kI3C_TransferDefaultFlag;
     masterXfer.ibiResponse = kI3C_IbiRespAckMandatory;
+
+    clear_daa_setup_snapshot();
+    capture_daa_setup_snapshot(base, DAA_SETUP_STAGE_CLEARED, 0U, rstdaaResult, daaResult, 0U, 0U);
 
     for (attempt = 0U; attempt < I3C_DMA_SEED_CHAIN_DAA_RETRY_ATTEMPTS; attempt++)
     {
@@ -793,13 +1034,29 @@ static status_t run_cpu_rstdaa_and_daa(I3C_Type *base, uint8_t *slaveAddr)
                                        (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
         base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
 
-        result = I3C_MasterTransferBlocking(base, &masterXfer);
-        if (result == kStatus_Success)
+        capture_daa_setup_snapshot(base,
+                                   DAA_SETUP_STAGE_RSTDAA_ATTEMPT,
+                                   attempt + 1U,
+                                   rstdaaResult,
+                                   daaResult,
+                                   devCount,
+                                   0U);
+
+        rstdaaResult = I3C_MasterTransferBlocking(base, &masterXfer);
+        if (rstdaaResult == kStatus_Success)
         {
             break;
         }
 
-        EXP_LOG_ERROR("RSTDAA failed on attempt %lu: %d", (unsigned long)(attempt + 1U), result);
+        capture_daa_setup_snapshot(base,
+                                   DAA_SETUP_STAGE_ERROR_RSTDAA,
+                                   attempt + 1U,
+                                   rstdaaResult,
+                                   daaResult,
+                                   devCount,
+                                   0U);
+
+        EXP_LOG_ERROR("RSTDAA failed on attempt %lu: %d", (unsigned long)(attempt + 1U), rstdaaResult);
 
         for (volatile uint32_t delay = 0U; delay < I3C_DMA_SEED_CHAIN_DAA_RETRY_DELAY; delay++)
         {
@@ -807,17 +1064,28 @@ static status_t run_cpu_rstdaa_and_daa(I3C_Type *base, uint8_t *slaveAddr)
         }
     }
 
-    if (result != kStatus_Success)
+    if (rstdaaResult != kStatus_Success)
     {
-        return result;
+        return run_cpu_setdasa_fallback(base, slaveAddr, rstdaaResult, I3C_DMA_SEED_CHAIN_DAA_RETRY_ATTEMPTS);
     }
 
-    result = I3C_MasterProcessDAA(base, addressList, ARRAY_SIZE(addressList));
-    if (result != kStatus_Success)
+    capture_daa_setup_snapshot(base, DAA_SETUP_STAGE_RSTDAA_OK, attempt + 1U, rstdaaResult, daaResult, 0U, 0U);
+
+    daaResult = I3C_MasterProcessDAA(base, addressList, ARRAY_SIZE(addressList));
+    if (daaResult != kStatus_Success)
     {
-        EXP_LOG_ERROR("DAA failed: %d", result);
-        return result;
+        capture_daa_setup_snapshot(base,
+                                   DAA_SETUP_STAGE_ERROR_DAA,
+                                   attempt + 1U,
+                                   rstdaaResult,
+                                   daaResult,
+                                   devCount,
+                                   0U);
+        EXP_LOG_ERROR("DAA failed: %d", daaResult);
+        return daaResult;
     }
+
+    capture_daa_setup_snapshot(base, DAA_SETUP_STAGE_DAA_OK, attempt + 1U, rstdaaResult, daaResult, devCount, 0U);
 
     devList = I3C_MasterGetDeviceListAfterDAA(base, &devCount);
     for (uint8_t devIndex = 0U; devIndex < devCount; devIndex++)
@@ -825,9 +1093,24 @@ static status_t run_cpu_rstdaa_and_daa(I3C_Type *base, uint8_t *slaveAddr)
         if (devList[devIndex].vendorID == 0x123U)
         {
             *slaveAddr = devList[devIndex].dynamicAddr;
+            capture_daa_setup_snapshot(base,
+                                       DAA_SETUP_STAGE_TARGET_FOUND,
+                                       attempt + 1U,
+                                       rstdaaResult,
+                                       daaResult,
+                                       devCount,
+                                       *slaveAddr);
             return kStatus_Success;
         }
     }
+
+    capture_daa_setup_snapshot(base,
+                               DAA_SETUP_STAGE_ERROR_NO_TARGET,
+                               attempt + 1U,
+                               rstdaaResult,
+                               daaResult,
+                               devCount,
+                               0U);
 
     EXP_LOG_ERROR("Target slave not found after DAA.");
     return kStatus_Fail;
@@ -945,29 +1228,66 @@ static status_t finalize_post_ibi_bus(I3C_Type *base)
     return result;
 }
 
+static status_t wait_for_post_ibi_read_ctrl_done(I3C_Type *base)
+{
+    volatile uint32_t timeout = 0U;
+
+    while (++timeout < I3C_DMA_SEED_CHAIN_TIMEOUT)
+    {
+        uint32_t status = I3C_MasterGetStatusFlags(base);
+        uint32_t errStatus = I3C_MasterGetErrorStatusFlags(base);
+
+        service_transfer_led();
+
+        if ((status & (uint32_t)kI3C_MasterControlDoneFlag) != 0U)
+        {
+            I3C_MasterClearStatusFlags(base, (uint32_t)kI3C_MasterControlDoneFlag);
+            if (errStatus != 0U)
+            {
+                I3C_MasterClearErrorStatusFlags(base, errStatus);
+            }
+            return kStatus_Success;
+        }
+
+        if ((errStatus & ~((uint32_t)kI3C_MasterErrorNackFlag)) != 0U)
+        {
+            return I3C_MasterCheckAndClearError(base, errStatus);
+        }
+    }
+
+    return kStatus_Timeout;
+}
+
 #if EXPERIMENT_POST_IBI_MANUAL_READ
 static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
 {
     static const uint32_t clear_flags = (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
                                         (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
                                         (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag;
-    uint8_t *buffer = s_rx_buffer;
-    size_t remaining = sizeof(s_rx_buffer);
     volatile uint32_t timeout = 0U;
+    uint8_t *nextByte = s_rx_buffer;
+    size_t remaining = sizeof(s_rx_buffer);
     status_t result;
 
     I3C_MasterClearErrorStatusFlags(base, I3C_MasterGetErrorStatusFlags(base));
     I3C_MasterClearStatusFlags(base, clear_flags);
+    base->MSTATUS = I3C_MSTATUS_NACKED_MASK;
     base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_CLEARED;
     s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
+    s_post_ibi_drain_probe.beginCount = 0U;
+    s_post_ibi_drain_probe.endCount = 0U;
+    s_post_ibi_drain_probe.rxCount = 0U;
+    s_post_ibi_drain_probe.errStatus = 0U;
+    s_post_ibi_drain_probe.remaining = (uint32_t)remaining;
+    trace_post_ibi_read_window_begin(1U);
 
     result = I3C_MasterStart(base, kI3C_TypeI3CSdr, slaveAddr, kI3C_Read);
     if (result != kStatus_Success)
     {
         s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_START;
         s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
-        return result;
+        goto exit;
     }
 
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_START_ISSUED;
@@ -977,11 +1297,10 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
     {
         s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_CTRL_DONE;
         s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
-        return result;
+        goto exit;
     }
 
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_CTRL_DONE;
-
     while (++timeout < I3C_DMA_SEED_CHAIN_TIMEOUT)
     {
         uint32_t rxCount = (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
@@ -989,29 +1308,28 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
 
         s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_DRAIN_LOOP;
         s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
-
-        service_transfer_led();
+        trace_post_ibi_drain_probe_begin(rxCount, (uint32_t)remaining);
 
         while ((remaining != 0U) && (rxCount != 0U))
         {
-            *buffer++ = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
+            *nextByte++ = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
             remaining--;
             rxCount--;
         }
 
+        trace_post_ibi_drain_probe_end(
+            (uint32_t)(sizeof(s_rx_buffer) - remaining), I3C_MasterGetErrorStatusFlags(base), (uint32_t)remaining);
+
         if (remaining == 0U)
         {
             result = I3C_MasterStop(base);
-            if ((result != kStatus_Success) && (result != kStatus_I3C_InvalidReq))
-            {
-                s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_LOOP;
-                s_roundtrip_read_snapshot.remaining = 0U;
-                return result;
-            }
-
             s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_STOP_SENT;
             s_roundtrip_read_snapshot.remaining = 0U;
-            return kStatus_Success;
+            if ((result == kStatus_Success) || (result == kStatus_I3C_InvalidReq))
+            {
+                result = kStatus_Success;
+            }
+            goto exit;
         }
 
         errStatus = I3C_MasterGetErrorStatusFlags(base);
@@ -1020,13 +1338,46 @@ static status_t read_roundtrip_payload_manual(I3C_Type *base, uint8_t slaveAddr)
         {
             s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_LOOP;
             s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
-            return result;
+            goto exit;
         }
     }
 
+    result = kStatus_Timeout;
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_ERROR_LOOP;
     s_roundtrip_read_snapshot.remaining = (uint32_t)remaining;
-    return kStatus_I3C_Timeout;
+
+exit:
+    trace_post_ibi_read_window_end(s_roundtrip_read_snapshot.stage, result, (uint32_t)remaining);
+    return result;
+}
+#endif
+
+#if EXPERIMENT_POST_IBI_BLOCKING_READ
+static status_t read_roundtrip_payload_blocking(I3C_Type *base, uint8_t slaveAddr)
+{
+    i3c_master_transfer_t masterXfer;
+    status_t result;
+
+    prepare_roundtrip_read_cpu_controller(base);
+
+    memset(&masterXfer, 0, sizeof(masterXfer));
+    masterXfer.slaveAddress = slaveAddr;
+    masterXfer.direction = kI3C_Read;
+    masterXfer.busType = kI3C_TypeI3CSdr;
+    masterXfer.flags = kI3C_TransferDefaultFlag;
+    masterXfer.ibiResponse = kI3C_IbiRespAckMandatory;
+    masterXfer.data = s_rx_buffer;
+    masterXfer.dataSize = sizeof(s_rx_buffer);
+
+    trace_post_ibi_read_window_begin(2U);
+    result = I3C_MasterTransferBlocking(base, &masterXfer);
+    s_roundtrip_read_status = result;
+    s_roundtrip_read_snapshot.stage =
+        (result == kStatus_Success) ? ROUNDTRIP_STAGE_BLOCKING_COMPLETED : ROUNDTRIP_STAGE_ERROR_BLOCKING;
+    s_roundtrip_read_snapshot.remaining = 0U;
+    trace_post_ibi_read_window_end(s_roundtrip_read_snapshot.stage, result, 0U);
+
+    return result;
 }
 #endif
 
@@ -1037,6 +1388,13 @@ static status_t run_roundtrip_read(I3C_Type *base, uint8_t slaveAddr)
 
     capture_post_ibi_handoff_snapshot(base, POST_IBI_HANDOFF_STAGE_BEFORE_READ_START, kStatus_Success);
     SDK_DelayAtLeastUs(I3C_DMA_SEED_TAIL_IBI_PRE_READ_DELAY_US, SystemCoreClock);
+
+    I3C_MasterClearErrorStatusFlags(base, I3C_MasterGetErrorStatusFlags(base));
+    I3C_MasterClearStatusFlags(base,
+                               (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
+                                   (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
+                                   (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
+    base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
 
     memset(s_rx_buffer, 0, sizeof(s_rx_buffer));
 
@@ -1054,12 +1412,19 @@ static status_t run_roundtrip_read(I3C_Type *base, uint8_t slaveAddr)
     return result;
 #endif
 
-    I3C_MasterClearErrorStatusFlags(base, I3C_MasterGetErrorStatusFlags(base));
-    I3C_MasterClearStatusFlags(base,
-                               (uint32_t)kI3C_MasterSlaveStartFlag | (uint32_t)kI3C_MasterControlDoneFlag |
-                                   (uint32_t)kI3C_MasterCompleteFlag | (uint32_t)kI3C_MasterArbitrationWonFlag |
-                                   (uint32_t)kI3C_MasterSlave2MasterFlag | (uint32_t)kI3C_MasterErrorFlag);
-    base->MDATACTRL |= I3C_MDATACTRL_FLUSHTB_MASK | I3C_MDATACTRL_FLUSHFB_MASK;
+#if EXPERIMENT_POST_IBI_BLOCKING_READ
+    clear_roundtrip_read_snapshot();
+    result = read_roundtrip_payload_blocking(base, slaveAddr);
+    capture_roundtrip_read_snapshot(base, result);
+
+    if (((result == kStatus_Success) || (result == kStatus_I3C_Nak) || (result == kStatus_I3C_Term)) &&
+        buffers_match(s_tx_buffer, s_rx_buffer, sizeof(s_rx_buffer)))
+    {
+        return kStatus_Success;
+    }
+
+    return result;
+#endif
     clear_roundtrip_read_snapshot();
     prepare_roundtrip_read_controller(base);
     s_roundtrip_read_snapshot.stage = ROUNDTRIP_STAGE_SMARTDMA_PREPARED;
@@ -1333,7 +1698,6 @@ int main(void)
 
     BOARD_InitHardware();
     init_transfer_led();
-    run_boot_led_self_test();
 
     for (volatile uint32_t startup_delay = 0U; startup_delay < I3C_DMA_SEED_CHAIN_STARTUP_WAIT; startup_delay++)
     {
@@ -1423,9 +1787,11 @@ int main(void)
         return -1;
     }
 
-    if (s_cm33_i3c_data_irq_count != 0U)
+    if (s_cm33_i3c_data_irq_count > s_ibi_payload_count)
     {
-        EXP_LOG_ERROR("Unexpected CM33 I3C data-ready IRQ count: %lu", (unsigned long)s_cm33_i3c_data_irq_count);
+        EXP_LOG_ERROR("Unexpected CM33 I3C data-ready IRQ count: actual=%lu ibi_payload=%lu",
+                      (unsigned long)s_cm33_i3c_data_irq_count,
+                      (unsigned long)s_ibi_payload_count);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;

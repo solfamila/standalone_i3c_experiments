@@ -98,6 +98,7 @@ LINKSERVER=${LINKSERVER_BIN:-$REPO_DIR/.local/linkserver/extracted/flatten_LinkS
 TOOLCHAIN_ROOT=${RT595_TOOLCHAIN_ROOT:-$REPO_DIR/.local/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi}
 CC=${RT595_CC:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-gcc}
 OBJCOPY=${RT595_OBJCOPY:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-objcopy}
+GDBBIN=${RT595_GDB:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-gdb}
 DEVICE=${RT595_DEVICE:-MIMXRT595S:EVK-MIMXRT595}
 MASTER_PROBE=${RT595_MASTER_PROBE:-${RT595_PROBE:-PRASAQKQ}}
 SLAVE_PROBE=${RT595_SLAVE_PROBE:-GRA1CQLQ}
@@ -105,8 +106,13 @@ EXIT_TIMEOUT=${RT595_EXIT_TIMEOUT:-20}
 FLASH_STATE_DIR=${RT595_FLASH_STATE_DIR:-$REPO_DIR/.local/state}
 SLAVE_RESET_PULSE_MS=${RT595_SLAVE_RESET_PULSE_MS:-50}
 SLAVE_RESET_SETTLE=${RT595_SLAVE_RESET_SETTLE:-1}
+MASTER_RESET_PULSE_MS=${RT595_MASTER_RESET_PULSE_MS:-50}
+MASTER_RESET_SETTLE=${RT595_MASTER_RESET_SETTLE:-0.2}
+MASTER_RESET_VIA_LINKSERVER=${RT595_MASTER_RESET_VIA_LINKSERVER:-0}
 SLAVE_READY_TIMEOUT=${RT595_SLAVE_READY_TIMEOUT:-20}
 SLAVE_READY_PATTERN=${RT595_SLAVE_READY_PATTERN:-'slave: waiting for master traff|slave: armed'}
+SLAVE_ATTACH_GDB_PORT=${RT595_SLAVE_ATTACH_GDB_PORT:-3337}
+SLAVE_LINKSERVER_MODE=${RT595_SLAVE_LINKSERVER_MODE:-serial:/dev/cu.usbmodem${SLAVE_PROBE}2:115200}
 SLAVE_POST_MASTER_WAIT=${RT595_SLAVE_POST_MASTER_WAIT:-1}
 MASTER_RUN_MODE=${RT595_MASTER_RUN_MODE:-linkserver}
 
@@ -239,6 +245,17 @@ reset_slave_board() {
   sleep "$SLAVE_RESET_SETTLE"
 }
 
+reset_master_board_quiet() {
+  if [[ "$MASTER_RESET_VIA_LINKSERVER" != 1 ]]; then
+    echo "Skipping master quiet reset via LinkServer; use Lauterbach/TRACE32 on the master side"
+    return 0
+  fi
+
+  echo "Resetting master to quiet bus on $MASTER_PROBE"
+  run_with_eintr_retry "$LINKSERVER" probe "$MASTER_PROBE" wiretimedreset "$MASTER_RESET_PULSE_MS"
+  sleep "$MASTER_RESET_SETTLE"
+}
+
 wait_for_slave_ready() {
   local log_file=$1
   local ready_pattern=$2
@@ -269,23 +286,113 @@ cleanup_slave_run() {
   fi
 }
 
+probe_redlink_pids() {
+  local probe_serial=$1
+
+  ps -ax -o pid=,command= | awk -v probe="$probe_serial" '
+    /crt_emu_cm_redlink/ && index($0, probe) { print $1 }
+  '
+}
+
+kill_probe_redlink_processes() {
+  local probe_serial=$1
+  local pid
+  local -a pids=()
+
+  while IFS= read -r pid; do
+    if [[ -n "$pid" ]]; then
+      pids+=("$pid")
+    fi
+  done < <(probe_redlink_pids "$probe_serial")
+
+  if (( ${#pids[@]} == 0 )); then
+    return 0
+  fi
+
+  kill "${pids[@]}" 2>/dev/null || true
+  sleep 0.2
+
+  while IFS= read -r pid; do
+    if [[ -n "$pid" ]]; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done < <(probe_redlink_pids "$probe_serial")
+}
+
+slave_only_quiet_bus_check() {
+  local gdb_log
+  local gdbserver_log
+  local gdbserver_pid
+  local gdb_status
+
+  gdb_log=$(mktemp)
+  gdbserver_log=$(mktemp)
+
+  "$LINKSERVER" gdbserver -p "$SLAVE_PROBE" --semihost-port -1 --gdb-port "$SLAVE_ATTACH_GDB_PORT" -a "$DEVICE" \
+    >"$gdbserver_log" 2>&1 &
+  gdbserver_pid=$!
+
+  set +e
+  "$GDBBIN" -q "$SLAVE_ELF" \
+    -ex 'set pagination off' \
+    -ex "target remote :$SLAVE_ATTACH_GDB_PORT" \
+    -ex 'printf "pc=0x%08lx\\n", (unsigned long)$pc' \
+    -ex 'printf "sp=0x%08lx\\n", (unsigned long)$sp' \
+    -ex 'printf "lr=0x%08lx\\n", (unsigned long)$lr' \
+    -ex 'detach' \
+    -ex 'quit' >"$gdb_log" 2>&1
+  gdb_status=$?
+  set -e
+
+  wait "$gdbserver_pid" >/dev/null 2>&1 || true
+
+  if [[ $gdb_status -ne 0 ]]; then
+    cat "$gdb_log" >&2
+    printf '\n--- slave gdbserver log ---\n' >&2
+    cat "$gdbserver_log" >&2
+    rm -f "$gdb_log" "$gdbserver_log"
+    return 1
+  fi
+
+  if grep -q '^pc=0x00000000$' "$gdb_log" && \
+     grep -q '^sp=0x00000000$' "$gdb_log" && \
+     grep -q '^lr=0x00000000$' "$gdb_log"; then
+    cat "$gdb_log" >&2
+    printf '\n--- slave gdbserver log ---\n' >&2
+    cat "$gdbserver_log" >&2
+    rm -f "$gdb_log" "$gdbserver_log"
+    return 1
+  fi
+
+  rm -f "$gdb_log" "$gdbserver_log"
+  return 0
+}
+
 start_slave_run() {
   local log_file=$1
+  local -a run_cmd=("$LINKSERVER" run -p "$SLAVE_PROBE" --exit-timeout "$EXIT_TIMEOUT")
 
   : >"$log_file"
-  "$LINKSERVER" run -p "$SLAVE_PROBE" --exit-timeout "$EXIT_TIMEOUT" "$DEVICE" "$SLAVE_ELF" >"$log_file" 2>&1 &
+  kill_probe_redlink_processes "$SLAVE_PROBE"
+
+  if [[ "$SLAVE_LINKSERVER_MODE" != "semihost" ]]; then
+    run_cmd+=(--mode "$SLAVE_LINKSERVER_MODE")
+  fi
+  run_cmd+=("$DEVICE" "$SLAVE_ELF")
+
+  nohup "${run_cmd[@]}" >"$log_file" 2>&1 < /dev/null &
   SLAVE_RUN_PID=$!
 
   if wait_for_slave_ready "$log_file" "$SLAVE_READY_PATTERN" "$SLAVE_READY_TIMEOUT"; then
     return 0
   fi
 
-  if [[ -n "${SLAVE_RUN_PID:-}" ]] && kill -0 "$SLAVE_RUN_PID" 2>/dev/null; then
-    echo "slave ready pattern not seen; continuing with background slave run" >&2
+  if slave_only_quiet_bus_check; then
+    echo "slave ready pattern not seen; slave-only quiet-bus check passed; continuing with background slave run" >&2
     return 0
   fi
 
-  echo "slave did not become ready before timeout" >&2
+  echo "slave did not become ready before timeout or quiet-bus check" >&2
   cat "$log_file" >&2
   cleanup_slave_run
   return 1
@@ -332,7 +439,7 @@ compile_master() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
-  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     master_driver_source="$SCRIPT_DIR/../src/master/drivers/fsl_i3c_smartdma.c"
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
   fi
@@ -457,8 +564,16 @@ compile_slave() {
 
   defines=("${COMMON_DEFINES[@]}" SDK_DEBUGCONSOLE=1)
 
-  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
+  fi
+
+  if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ]]; then
+    defines+=(EXPERIMENT_SKIP_SLAVE_BOOT_LED_TEST=1)
+  fi
+
+  if [[ "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
+    defines+=(EXPERIMENT_SLAVE_MIN_ECHO_COUNT=8)
   fi
 
   sources+=(
@@ -631,12 +746,31 @@ else
   echo "Skipping slave flash on $SLAVE_PROBE; image unchanged"
 fi
 
-echo "Resetting slave on $SLAVE_PROBE"
-reset_slave_board "$SLAVE_LOG"
+reset_master_board_quiet
+
+USE_LIVE_SLAVE_RUN=0
+if [[ ( "$MASTER_RUN_MODE" == "linkserver" && "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" ) || "${RT595_SLAVE_LIVE_RUN:-0}" == 1 ]]; then
+  USE_LIVE_SLAVE_RUN=1
+fi
+
+if [[ $USE_LIVE_SLAVE_RUN -eq 1 ]]; then
+  echo "Running slave on $SLAVE_PROBE and waiting for ready"
+  start_slave_run "$SLAVE_LOG"
+  if [[ "$MASTER_RUN_MODE" == "linkserver" ]]; then
+    trap cleanup_slave_run EXIT
+  fi
+else
+  echo "Resetting slave on $SLAVE_PROBE"
+  reset_slave_board "$SLAVE_LOG"
+fi
 
 if [[ "$MASTER_RUN_MODE" != "linkserver" ]]; then
   skip_master_linkserver_run
-  echo "Slave reset complete on $SLAVE_PROBE"
+  if [[ $USE_LIVE_SLAVE_RUN -eq 1 ]]; then
+    echo "Slave live run started on $SLAVE_PROBE"
+  else
+    echo "Slave reset complete on $SLAVE_PROBE"
+  fi
   exit 0
 fi
 

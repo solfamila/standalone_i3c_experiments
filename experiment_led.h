@@ -27,18 +27,32 @@ static inline uint8_t EXP_LED_Level(bool on)
 #endif
 }
 
+static inline void EXP_LED_WriteRawPin(uint32_t port, uint32_t pin, uint8_t level)
+{
+    const uint32_t mask = 1UL << pin;
+
+    if (level != 0U)
+    {
+        GPIO_PortSet(GPIO, port, mask);
+    }
+    else
+    {
+        GPIO_PortClear(GPIO, port, mask);
+    }
+}
+
 static inline void EXP_LED_RawLevels(uint8_t red, uint8_t green, uint8_t blue)
 {
-    GPIO_PinWrite(GPIO, EXP_LED_RED_PORT, EXP_LED_RED_PIN, red);
-    GPIO_PinWrite(GPIO, EXP_LED_GREEN_PORT, EXP_LED_GREEN_PIN, green);
-    GPIO_PinWrite(GPIO, EXP_LED_BLUE_PORT, EXP_LED_BLUE_PIN, blue);
+    EXP_LED_WriteRawPin(EXP_LED_RED_PORT, EXP_LED_RED_PIN, red);
+    EXP_LED_WriteRawPin(EXP_LED_GREEN_PORT, EXP_LED_GREEN_PIN, green);
+    EXP_LED_WriteRawPin(EXP_LED_BLUE_PORT, EXP_LED_BLUE_PIN, blue);
 }
 
 static inline void EXP_LED_EnableClocks(void)
 {
-    CLOCK_EnableClock(kCLOCK_HsGpio0);
-    CLOCK_EnableClock(kCLOCK_HsGpio1);
-    CLOCK_EnableClock(kCLOCK_HsGpio3);
+    GPIO_PortInit(GPIO, EXP_LED_RED_PORT);
+    GPIO_PortInit(GPIO, EXP_LED_GREEN_PORT);
+    GPIO_PortInit(GPIO, EXP_LED_BLUE_PORT);
 }
 
 static inline void EXP_LED_PinMuxGpio(uint32_t port, uint32_t pin)

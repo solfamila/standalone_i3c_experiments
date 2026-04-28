@@ -84,6 +84,12 @@ typedef struct _i3c_slave_txready_debug
     uint32_t usedCallback;
     uint32_t prearmAtBusStart;
     uint32_t prearmAtMatched;
+    uint32_t matchedFlags;
+    uint32_t matchedSeedTriggered;
+    uint32_t matchedSeedTxDataSizeBeforeWrite;
+    uint32_t matchedSeedWritesAttempted;
+    uint32_t matchedSeedTransferredCountAfterWrite;
+    uint32_t matchedSeedTxDataSizeAfterWrite;
     uint32_t flags;
     uint32_t pendingInts;
     uint32_t txCountBeforeCallback;
@@ -97,12 +103,58 @@ typedef struct _i3c_slave_txready_debug
     uint32_t writesAttempted;
     uint32_t transferredCountAfterWrite;
     uint32_t txDataSizeAfterWrite;
+    uint32_t reqReadEntryCount;
+    uint32_t reqReadFlags;
+    uint32_t reqReadPendingInts;
+    uint32_t reqReadUsedCallback;
+    uint32_t reqReadTxDataSizeAtEntry;
+    uint32_t reqReadTxDataNullAtEntry;
+    uint32_t reqReadTxDataSizeAfterCallback;
+    uint32_t reqReadTxDataNullAfterCallback;
+    uint32_t reqReadStatusAfterCallback;
+    uint32_t reqReadErrAfterCallback;
+    uint32_t reqReadWritesAttempted;
+    uint32_t reqReadTransferredCountAfterWrite;
+    uint32_t reqReadTxDataSizeAfterWrite;
+    uint32_t reqReadFallbackTxBuffNull;
+    uint32_t reqReadFallbackTxSize;
+    uint32_t reqReadFallbackIbiRequestSent;
+    uint32_t reqReadFallbackUsedEchoBuffer;
+    uint32_t postRequestEntryCount;
+    uint32_t postRequestFlags;
+    uint32_t postRequestPendingInts;
+    uint32_t postRequestUsedCallback;
+    uint32_t postRequestTxDataSizeAtEntry;
+    uint32_t postRequestTxDataNullAtEntry;
+    uint32_t postRequestTxDataSizeAfterCallback;
+    uint32_t postRequestTxDataNullAfterCallback;
+    uint32_t postRequestWritesAttempted;
+    uint32_t postRequestTransferredCountAfterWrite;
+    uint32_t postRequestTxDataSizeAfterWrite;
+    uint32_t postMatchEntryCount;
+    uint32_t postMatchFlags;
+    uint32_t postMatchPendingInts;
+    uint32_t postMatchTxDataSizeAtEntry;
+    uint32_t postMatchWritesAttempted;
+    uint32_t postMatchTxDataSizeAfterWrite;
+    uint32_t postIbiReqReadEntryCount;
+    uint32_t postIbiReqReadFlags;
+    uint32_t postIbiReqReadPendingInts;
+    uint32_t postIbiReqReadUsedCallback;
+    uint32_t postIbiReqReadTxDataSizeAtEntry;
+    uint32_t postIbiReqReadTxDataNullAtEntry;
+    uint32_t postIbiReqReadTxDataSizeAfterCallback;
+    uint32_t postIbiReqReadTxDataNullAfterCallback;
+    uint32_t postIbiReqReadWritesAttempted;
+    uint32_t postIbiReqReadTxDataSizeAfterWrite;
 } i3c_slave_txready_debug_t;
 
 __attribute__((section(".usb_ram"), used, aligned(4))) volatile i3c_slave_txready_debug_t g_i3cSlaveTxReadyDebug;
 
 #if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
 extern volatile bool g_slaveIbiRequestSent;
+extern volatile bool g_slaveIbiIssued;
+extern volatile bool g_slavePostIbiAddressMatched;
 #endif
 
 /*
@@ -185,8 +237,87 @@ typedef struct i3c_master_error_trace
     uint32_t hitCount;
 } i3c_master_error_trace_t;
 
+typedef struct i3c_master_receive_iter_trace
+{
+    uint32_t beginCount;
+    uint32_t endCount;
+    uint32_t beginStatus;
+    uint32_t beginErrStatus;
+    uint32_t beginMdatactrl;
+    uint32_t beginRxRemaining;
+    uint32_t endStatus;
+    uint32_t endErrStatus;
+    uint32_t endMdatactrl;
+    uint32_t endRxRemaining;
+    uint32_t completed;
+} i3c_master_receive_iter_trace_t;
+
+typedef struct i3c_master_receive_nack_retry_trace
+{
+    uint32_t beginCount;
+    uint32_t endCount;
+    uint32_t beginMdatactrl;
+    uint32_t beginRxRemaining;
+    uint32_t beginRxCount;
+    uint32_t endMdatactrl;
+    uint32_t endRxRemaining;
+    uint32_t endRxCount;
+} i3c_master_receive_nack_retry_trace_t;
+
 volatile i3c_master_error_trace_t g_i3cMasterWaitCtrlDoneErrorTrace;
 volatile i3c_master_error_trace_t g_i3cMasterReceiveErrorTrace;
+volatile i3c_master_receive_iter_trace_t g_i3cMasterReceiveIterTrace;
+volatile i3c_master_receive_nack_retry_trace_t g_i3cMasterReceiveNackRetryTrace;
+
+__attribute__((noinline, used)) void trace_i3c_master_receive_iter_begin(uint32_t status,
+                                                                          uint32_t errStatus,
+                                                                          uint32_t mdatactrl,
+                                                                          uint32_t rxRemaining)
+{
+    g_i3cMasterReceiveIterTrace.beginCount++;
+    g_i3cMasterReceiveIterTrace.beginStatus = status;
+    g_i3cMasterReceiveIterTrace.beginErrStatus = errStatus;
+    g_i3cMasterReceiveIterTrace.beginMdatactrl = mdatactrl;
+    g_i3cMasterReceiveIterTrace.beginRxRemaining = rxRemaining;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_i3c_master_receive_iter_end(uint32_t status,
+                                                                        uint32_t errStatus,
+                                                                        uint32_t mdatactrl,
+                                                                        uint32_t rxRemaining,
+                                                                        uint32_t completed)
+{
+    g_i3cMasterReceiveIterTrace.endCount++;
+    g_i3cMasterReceiveIterTrace.endStatus = status;
+    g_i3cMasterReceiveIterTrace.endErrStatus = errStatus;
+    g_i3cMasterReceiveIterTrace.endMdatactrl = mdatactrl;
+    g_i3cMasterReceiveIterTrace.endRxRemaining = rxRemaining;
+    g_i3cMasterReceiveIterTrace.completed = completed;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_i3c_master_receive_nack_retry_begin(uint32_t mdatactrl,
+                                                                                uint32_t rxRemaining,
+                                                                                uint32_t rxCount)
+{
+    g_i3cMasterReceiveNackRetryTrace.beginCount++;
+    g_i3cMasterReceiveNackRetryTrace.beginMdatactrl = mdatactrl;
+    g_i3cMasterReceiveNackRetryTrace.beginRxRemaining = rxRemaining;
+    g_i3cMasterReceiveNackRetryTrace.beginRxCount = rxCount;
+    __asm volatile("" ::: "memory");
+}
+
+__attribute__((noinline, used)) void trace_i3c_master_receive_nack_retry_end(uint32_t mdatactrl,
+                                                                              uint32_t rxRemaining,
+                                                                              uint32_t rxCount)
+{
+    g_i3cMasterReceiveNackRetryTrace.endCount++;
+    g_i3cMasterReceiveNackRetryTrace.endMdatactrl = mdatactrl;
+    g_i3cMasterReceiveNackRetryTrace.endRxRemaining = rxRemaining;
+    g_i3cMasterReceiveNackRetryTrace.endRxCount = rxCount;
+    __asm volatile("" ::: "memory");
+}
 
 static void I3C_MasterRecordErrorTrace(volatile i3c_master_error_trace_t *trace,
                                        I3C_Type *base,
@@ -358,7 +489,8 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
 static void I3C_SlaveTransferHandleMatched(I3C_Type *base,
                                            i3c_slave_handle_t *handle,
                                            i3c_slave_transfer_t *xfer,
-                                           uint32_t flags);
+                                           uint32_t flags,
+                                           uint32_t *pendingInts);
 
 /*!
  * @brief introduce function I3C_SlaveTransferHandleTxReady.
@@ -1599,6 +1731,9 @@ status_t I3C_MasterReceive(I3C_Type *base, void *rxBuff, size_t rxSize, uint32_t
 #endif
         uint32_t mdatactrl = base->MDATACTRL;
         uint32_t errStatus = I3C_MasterGetErrorStatusFlags(base);
+        uint32_t loopStatus = I3C_MasterGetStatusFlags(base);
+
+        trace_i3c_master_receive_iter_begin(loopStatus, errStatus, mdatactrl, (uint32_t)rxSize);
 
 #if !defined(FSL_FEATURE_I3C_HAS_NO_MERRWARN_TERM) || (!FSL_FEATURE_I3C_HAS_NO_MERRWARN_TERM)
         if (0UL != (errStatus & (uint32_t)kI3C_MasterErrorTermFlag))
@@ -1660,19 +1795,56 @@ status_t I3C_MasterReceive(I3C_Type *base, void *rxBuff, size_t rxSize, uint32_t
 
         /* Check for errors after draining any pending Rx bytes and honoring completion. */
         errStatus = I3C_MasterGetErrorStatusFlags(base);
+        trace_i3c_master_receive_iter_end(I3C_MasterGetStatusFlags(base),
+                                          errStatus,
+                                          base->MDATACTRL,
+                                          (uint32_t)rxSize,
+                                          completed ? 1U : 0U);
+        status = I3C_MasterGetStatusFlags(base);
+        if (((status & (uint32_t)kI3C_MasterNackDetectFlag) != 0U) && (rxSize != 0UL))
+        {
+            /*
+             * Some post-IBI reads assert the sticky NACKED status before the final bytes become visible
+             * in MRDATAB. Reuse the existing NACK retry/drain path instead of bailing out immediately.
+             */
+            base->MSTATUS = I3C_MSTATUS_NACKED_MASK;
+            if (errStatus == 0UL)
+            {
+                errStatus = (uint32_t)kI3C_MasterErrorNackFlag;
+            }
+        }
         if ((errStatus == (uint32_t)kI3C_MasterErrorNackFlag) && (rxSize != 0UL))
         {
             uint32_t nackDrainRetries = 256U;
+            bool traceNackRetryPending = true;
 
             while (nackDrainRetries-- != 0U)
             {
                 rxCount = (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
+                if (traceNackRetryPending)
+                {
+                    trace_i3c_master_receive_nack_retry_begin(base->MDATACTRL, (uint32_t)rxSize, (uint32_t)rxCount);
+                }
+                if (rxCount == 0UL)
+                {
+                    uint32_t rxReadyPolls = 1024U;
+
+                    do
+                    {
+                        rxCount = (base->MDATACTRL & I3C_MDATACTRL_RXCOUNT_MASK) >> I3C_MDATACTRL_RXCOUNT_SHIFT;
+                    } while ((rxCount == 0UL) && (rxReadyPolls-- != 0U));
+                }
                 while ((rxSize != 0UL) && (rxCount != 0UL))
                 {
                     lastByte = (uint8_t)(base->MRDATAB & I3C_MRDATAB_VALUE_MASK);
                     *buf++ = lastByte;
                     rxSize--;
                     rxCount--;
+                }
+                if (traceNackRetryPending)
+                {
+                    trace_i3c_master_receive_nack_retry_end(base->MDATACTRL, (uint32_t)rxSize, (uint32_t)rxCount);
+                    traceNackRetryPending = false;
                 }
 
                 if (rxSize == 0UL)
@@ -3562,30 +3734,34 @@ static void I3C_SlaveTransferHandleBusStart(I3C_Type *base,
                                             uint32_t flags,
                                             uint32_t *pendingInts)
 {
-    base->SDATACTRL |= I3C_SDATACTRL_FLUSHTB_MASK;
-    if ((xfer->txData == NULL) || (xfer->txDataSize == 0U))
+    (void)handle;
+    (void)flags;
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    if (g_slaveIbiRequestSent && (xfer->txData != NULL) && (xfer->txDataSize != 0UL))
     {
-        xfer->txDataSize = 0;
+        /* Preserve a pre-armed post-IBI reply across the start that begins
+         * the controller readback.
+         */
+        g_i3cSlaveTxReadyDebug.prearmAtBusStart = xfer->txDataSize;
+        I3C_SlaveEnableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+        (*pendingInts) |= (uint32_t)kI3C_SlaveTxReadyFlag;
+        return;
     }
+#endif
+    base->SDATACTRL |= I3C_SDATACTRL_FLUSHTB_MASK;
+    g_i3cSlaveTxReadyDebug.prearmAtBusStart = 0U;
+    xfer->txData = NULL;
+    xfer->txDataSize = 0U;
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    if (g_slaveIbiRequestSent)
+    {
+        I3C_SlaveDisableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+        (*pendingInts) &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
+        return;
+    }
+#endif
     I3C_SlaveEnableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
     (*pendingInts) |= (uint32_t)kI3C_SlaveTxReadyFlag;
-    g_i3cSlaveTxReadyDebug.prearmAtBusStart = 0U;
-
-    if ((0UL != (flags & (uint32_t)kI3C_SlaveRequiredReadFlag)) && (NULL != handle->callback)
-#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
-        && g_slaveIbiRequestSent
-#endif
-    )
-    {
-        xfer->event = (uint32_t)kI3C_SlaveTransmitEvent;
-        if (0UL != (flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
-        {
-            xfer->event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
-        }
-        handle->callback(base, xfer, handle->userData);
-        handle->transferredCount = 0U;
-        g_i3cSlaveTxReadyDebug.prearmAtBusStart = xfer->txDataSize;
-    }
 }
 
 static void I3C_SlaveTransferHandleEventSent(I3C_Type *base, i3c_slave_handle_t *handle, i3c_slave_transfer_t *xfer)
@@ -3595,6 +3771,45 @@ static void I3C_SlaveTransferHandleEventSent(I3C_Type *base, i3c_slave_handle_t 
     {
         handle->callback(base, xfer, handle->userData);
     }
+
+    handle->wasTransmit = false;
+    handle->transferredCount = 0U;
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    if (g_slaveIbiRequestSent && (g_txBuff != NULL) && (g_txSize != 0U))
+    {
+        size_t txCount;
+
+        xfer->txData = g_txBuff;
+        xfer->txDataSize = g_txSize;
+
+        I3C_SlaveGetFifoCounts(base, NULL, &txCount);
+        assert(handle->txFifoSize >= txCount);
+        txCount = handle->txFifoSize - txCount;
+
+        if ((xfer->txDataSize != 0UL) && (txCount != 0U))
+        {
+            if (xfer->txDataSize > 1UL)
+            {
+                base->SWDATAB = *xfer->txData++;
+            }
+            else
+            {
+                base->SWDATABE = *xfer->txData++;
+            }
+
+            xfer->txDataSize--;
+        }
+
+        return;
+    }
+#endif
+
+    /* The IBI payload phase is complete once EVENT is reported. Clear the
+     * transmit state so the follow-on controller read must re-arm through the
+     * normal slave transmit callback instead of inheriting the IBI sender state.
+     */
+    xfer->txData = NULL;
+    xfer->txDataSize = 0U;
 }
 
 static void I3C_SlaveTransferHandleReceivedCCC(I3C_Type *base, i3c_slave_handle_t *handle, i3c_slave_transfer_t *xfer)
@@ -3626,6 +3841,30 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
             ++(handle->transferredCount);
             --lateRxCount;
         }
+
+        /* Some stop-bound write completions leave the terminal RX byte pending in the
+         * receive datapath without it being reflected in RXCOUNT or RxReady. Recover
+         * one trailing byte whenever a write transfer stops with buffer space remaining.
+         */
+        if ((lateRxCount == 0U) && ((stateParams->flags & (uint32_t)kI3C_SlaveRequiredWriteFlag) != 0U) &&
+            (handle->transfer.rxData != NULL) && (handle->transfer.rxDataSize != 0UL) &&
+            (handle->transferredCount != 0U))
+        {
+            *(handle->transfer.rxData++) = (uint8_t)(base->SRDATAB & 0xFFU);
+            --(handle->transfer.rxDataSize);
+            ++(handle->transferredCount);
+        }
+    }
+#endif
+
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    if (g_slaveIbiRequestSent && !handle->wasTransmit && (handle->transfer.txData != NULL) &&
+        (handle->transfer.txDataSize != 0UL))
+    {
+        I3C_SlaveDisableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+        stateParams->pendingInts &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
+        base->SDATACTRL |= I3C_SDATACTRL_FLUSHFB_MASK;
+        return;
     }
 #endif
 
@@ -3667,42 +3906,89 @@ static void I3C_SlaveTransferHandleBusStop(I3C_Type *base,
 static void I3C_SlaveTransferHandleMatched(I3C_Type *base,
                                            i3c_slave_handle_t *handle,
                                            i3c_slave_transfer_t *xfer,
-                                           uint32_t flags)
+                                           uint32_t flags,
+                                           uint32_t *pendingInts)
 {
-    assert(NULL != base && NULL != handle && NULL != xfer);
+    assert(NULL != base && NULL != handle && NULL != xfer && NULL != pendingInts);
     xfer->event    = (uint32_t)kI3C_SlaveAddressMatchEvent;
     handle->isBusy = true;
 
     if ((0UL != (handle->eventMask & (uint32_t)kI3C_SlaveAddressMatchEvent)) && (NULL != handle->callback))
     {
         handle->callback(base, xfer, handle->userData);
-        if ((xfer->txData != NULL) && (xfer->txDataSize != 0U))
-        {
-            handle->transferredCount = 0U;
-        }
     }
 
-    g_i3cSlaveTxReadyDebug.prearmAtMatched = 0U;
+#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
+    g_i3cSlaveTxReadyDebug.matchedFlags = flags;
+    g_i3cSlaveTxReadyDebug.matchedSeedTriggered = 0U;
+    g_i3cSlaveTxReadyDebug.matchedSeedTxDataSizeBeforeWrite = xfer->txDataSize;
+    g_i3cSlaveTxReadyDebug.matchedSeedWritesAttempted = 0U;
+    g_i3cSlaveTxReadyDebug.matchedSeedTransferredCountAfterWrite = handle->transferredCount;
+    g_i3cSlaveTxReadyDebug.matchedSeedTxDataSizeAfterWrite = xfer->txDataSize;
 
-    /* Prime the transmit buffer on a read match so TxReady can write immediately. */
-    if ((0UL != (flags & (uint32_t)kI3C_SlaveRequiredReadFlag)) &&
-        ((NULL == xfer->txData) || (0UL == xfer->txDataSize)) && (NULL != handle->callback))
+    if (g_slaveIbiRequestSent && (xfer->txData != NULL) && (xfer->txDataSize != 0UL))
     {
-        xfer->event = (uint32_t)kI3C_SlaveTransmitEvent;
-        if (0UL != (flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
-        {
-            xfer->event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
-        }
-        handle->callback(base, xfer, handle->userData);
+        size_t txCount;
+
+        g_i3cSlaveTxReadyDebug.matchedSeedTriggered = 1U;
         handle->transferredCount = 0U;
-        g_i3cSlaveTxReadyDebug.prearmAtMatched = xfer->txDataSize;
+
+        I3C_SlaveGetFifoCounts(base, NULL, &txCount);
+        assert(handle->txFifoSize >= txCount);
+        txCount = handle->txFifoSize - txCount;
+
+        if ((xfer->txDataSize != 0UL) && (txCount != 0U))
+        {
+            g_i3cSlaveTxReadyDebug.matchedSeedWritesAttempted++;
+
+            if (xfer->txDataSize > 1UL)
+            {
+                base->SWDATAB = *xfer->txData++;
+            }
+            else
+            {
+                base->SWDATABE = *xfer->txData++;
+            }
+
+            xfer->txDataSize--;
+            handle->transferredCount++;
+        }
+
+        g_i3cSlaveTxReadyDebug.matchedSeedTransferredCountAfterWrite = handle->transferredCount;
+        g_i3cSlaveTxReadyDebug.matchedSeedTxDataSizeAfterWrite = xfer->txDataSize;
     }
+
+    if (g_slaveIbiRequestSent)
+    {
+        if (xfer->txDataSize != 0UL)
+        {
+            I3C_SlaveEnableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+            /*
+             * Defer the remaining bytes until the actual required-read phase.
+             * Servicing TxReady immediately in the address-match IRQ drains the reply too early.
+             */
+            (*pendingInts) &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
+        }
+        else
+        {
+            I3C_SlaveDisableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+            (*pendingInts) &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
+        }
+    }
+#endif
+
+    g_i3cSlaveTxReadyDebug.prearmAtMatched = xfer->txDataSize;
 }
 
 static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
                                            i3c_slave_handle_t *handle,
                                            i3c_slave_handleIrq_param_t *stateParams)
 {
+    bool reqReadLatchArmed;
+    bool postRequestLatchArmed;
+    bool postMatchLatchArmed;
+    bool postIbiReqReadLatchArmed;
+
     assert(NULL != base && NULL != handle && NULL != stateParams);
 
     g_i3cSlaveTxReadyDebug.entryCount++;
@@ -3720,50 +4006,163 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
     g_i3cSlaveTxReadyDebug.writesAttempted = 0U;
     g_i3cSlaveTxReadyDebug.transferredCountAfterWrite = handle->transferredCount;
     g_i3cSlaveTxReadyDebug.txDataSizeAfterWrite = handle->transfer.txDataSize;
+    reqReadLatchArmed = (((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) != 0U) &&
+                         (g_i3cSlaveTxReadyDebug.reqReadEntryCount == 0U));
+    postRequestLatchArmed = (g_slaveIbiRequestSent && (g_i3cSlaveTxReadyDebug.postRequestEntryCount == 0U));
+    if (reqReadLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.reqReadEntryCount = g_i3cSlaveTxReadyDebug.entryCount;
+        g_i3cSlaveTxReadyDebug.reqReadFlags = stateParams->flags;
+        g_i3cSlaveTxReadyDebug.reqReadPendingInts = stateParams->pendingInts;
+        g_i3cSlaveTxReadyDebug.reqReadUsedCallback = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataSizeAtEntry = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataNullAtEntry = (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataSizeAfterCallback = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataNullAfterCallback =
+            (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.reqReadStatusAfterCallback = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadErrAfterCallback = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadWritesAttempted = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadTransferredCountAfterWrite = handle->transferredCount;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataSizeAfterWrite = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.reqReadFallbackTxBuffNull = 1U;
+        g_i3cSlaveTxReadyDebug.reqReadFallbackTxSize = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadFallbackIbiRequestSent = 0U;
+        g_i3cSlaveTxReadyDebug.reqReadFallbackUsedEchoBuffer = 0U;
+    }
+    if (postRequestLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postRequestEntryCount = g_i3cSlaveTxReadyDebug.entryCount;
+        g_i3cSlaveTxReadyDebug.postRequestFlags = stateParams->flags;
+        g_i3cSlaveTxReadyDebug.postRequestPendingInts = stateParams->pendingInts;
+        g_i3cSlaveTxReadyDebug.postRequestUsedCallback = 0U;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataSizeAtEntry = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataNullAtEntry = (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataSizeAfterCallback = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataNullAfterCallback =
+            (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.postRequestWritesAttempted = 0U;
+        g_i3cSlaveTxReadyDebug.postRequestTransferredCountAfterWrite = handle->transferredCount;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
+    postMatchLatchArmed = (g_slavePostIbiAddressMatched && (g_i3cSlaveTxReadyDebug.postMatchEntryCount == 0U));
+    if (postMatchLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postMatchEntryCount = g_i3cSlaveTxReadyDebug.entryCount;
+        g_i3cSlaveTxReadyDebug.postMatchFlags = stateParams->flags;
+        g_i3cSlaveTxReadyDebug.postMatchPendingInts = stateParams->pendingInts;
+        g_i3cSlaveTxReadyDebug.postMatchTxDataSizeAtEntry = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.postMatchWritesAttempted = 0U;
+        g_i3cSlaveTxReadyDebug.postMatchTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
+    postIbiReqReadLatchArmed = (g_slavePostIbiAddressMatched &&
+                                ((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) != 0U) &&
+                                (g_i3cSlaveTxReadyDebug.postIbiReqReadEntryCount == 0U));
+    if (postIbiReqReadLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postIbiReqReadEntryCount = g_i3cSlaveTxReadyDebug.entryCount;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadFlags = stateParams->flags;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadPendingInts = stateParams->pendingInts;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadUsedCallback = 0U;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataSizeAtEntry = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataNullAtEntry = (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataSizeAfterCallback = handle->transfer.txDataSize;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataNullAfterCallback =
+            (handle->transfer.txData == NULL) ? 1U : 0U;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadWritesAttempted = 0U;
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
 
-    handle->wasTransmit = true;
-
-    if ((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) == 0U)
+    if (((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) == 0U) && !handle->wasTransmit &&
+        !g_slavePostIbiAddressMatched)
     {
         return;
     }
 
-#if defined(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX)
-    if (((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize)) && (g_txBuff != NULL) &&
-        (g_txSize != 0U) && g_slaveIbiRequestSent)
+    if (((stateParams->flags & (uint32_t)kI3C_SlaveRequiredReadFlag) == 0U) &&
+        (g_i3cSlaveTxReadyDebug.matchedSeedWritesAttempted != 0U) &&
+        ((handle->transfer.txData == NULL) || (handle->transfer.txDataSize == 0UL)))
     {
-        handle->transfer.txData = g_txBuff;
-        handle->transfer.txDataSize = g_txSize;
-        handle->transferredCount = 0U;
+        I3C_SlaveDisableInterrupts(base, (uint32_t)kI3C_SlaveTxReadyFlag);
+        (stateParams->pendingInts) &= ~(uint32_t)kI3C_SlaveTxReadyFlag;
+        return;
     }
-#endif
 
     /* If we're out of data, invoke callback to get more. */
     if ((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize))
     {
-        g_i3cSlaveTxReadyDebug.usedCallback = 1U;
-        handle->transfer.event = (uint32_t)kI3C_SlaveTransmitEvent;
-        if (0UL != (stateParams->flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
+        if (!(reqReadLatchArmed && (g_i3cSlaveTxReadyDebug.matchedSeedWritesAttempted != 0U)))
         {
-            handle->transfer.event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
-            handle->isBusy = true;
-        }
-        if (NULL != handle->callback)
-        {
-            handle->callback(base, &handle->transfer, handle->userData);
-        }
+            g_i3cSlaveTxReadyDebug.usedCallback = 1U;
+            if (reqReadLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.reqReadUsedCallback = 1U;
+            }
+            if (postRequestLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.postRequestUsedCallback = 1U;
+            }
+            if (postIbiReqReadLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.postIbiReqReadUsedCallback = 1U;
+            }
+            handle->transfer.event = (uint32_t)kI3C_SlaveTransmitEvent;
+            if (0UL != (stateParams->flags & (uint32_t)kI3C_SlaveBusHDRModeFlag))
+            {
+                handle->transfer.event |= (uint32_t)kI3C_SlaveHDRCommandMatchEvent;
+                handle->isBusy = true;
+            }
+            if (NULL != handle->callback)
+            {
+                handle->callback(base, &handle->transfer, handle->userData);
+            }
 
-        /* Clear the transferred count now that we have a new buffer. */
-        handle->transferredCount = 0;
+            /* Clear the transferred count now that we have a new buffer. */
+            handle->transferredCount = 0;
 
-        /* Re-read FIFO room after the callback arms a fresh TX buffer. */
-        I3C_SlaveGetFifoCounts(base, NULL, &stateParams->txCount);
-        stateParams->txCount = handle->txFifoSize - stateParams->txCount;
-        g_i3cSlaveTxReadyDebug.txCountAfterCallback = stateParams->txCount;
-        g_i3cSlaveTxReadyDebug.txDataSizeAfterCallback = handle->transfer.txDataSize;
-        g_i3cSlaveTxReadyDebug.txDataNullAfterCallback = (handle->transfer.txData == NULL) ? 1U : 0U;
-        g_i3cSlaveTxReadyDebug.statusAfterCallback = I3C_SlaveGetStatusFlags(base);
-        g_i3cSlaveTxReadyDebug.errAfterCallback = I3C_SlaveGetErrorStatusFlags(base);
+            /* Re-read FIFO room after the callback arms a fresh TX buffer. */
+            I3C_SlaveGetFifoCounts(base, NULL, &stateParams->txCount);
+            stateParams->txCount = handle->txFifoSize - stateParams->txCount;
+            if (reqReadLatchArmed && ((handle->transfer.txData == NULL) || (handle->transfer.txDataSize == 0UL)) &&
+                (g_i3cSlaveTxReadyDebug.matchedSeedWritesAttempted == 0U) && (g_txBuff != NULL) && (g_txSize != 0U))
+            {
+                handle->transfer.txData = g_txBuff;
+                handle->transfer.txDataSize = g_txSize;
+                g_i3cSlaveTxReadyDebug.reqReadFallbackUsedEchoBuffer = 1U;
+            }
+            g_i3cSlaveTxReadyDebug.txCountAfterCallback = stateParams->txCount;
+            g_i3cSlaveTxReadyDebug.txDataSizeAfterCallback = handle->transfer.txDataSize;
+            g_i3cSlaveTxReadyDebug.txDataNullAfterCallback = (handle->transfer.txData == NULL) ? 1U : 0U;
+            g_i3cSlaveTxReadyDebug.statusAfterCallback = I3C_SlaveGetStatusFlags(base);
+            g_i3cSlaveTxReadyDebug.errAfterCallback = I3C_SlaveGetErrorStatusFlags(base);
+            if (reqReadLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.reqReadTxDataSizeAfterCallback = handle->transfer.txDataSize;
+                g_i3cSlaveTxReadyDebug.reqReadTxDataNullAfterCallback =
+                    (handle->transfer.txData == NULL) ? 1U : 0U;
+                g_i3cSlaveTxReadyDebug.reqReadStatusAfterCallback = g_i3cSlaveTxReadyDebug.statusAfterCallback;
+                g_i3cSlaveTxReadyDebug.reqReadErrAfterCallback = g_i3cSlaveTxReadyDebug.errAfterCallback;
+                g_i3cSlaveTxReadyDebug.reqReadFallbackTxBuffNull = (g_txBuff == NULL) ? 1U : 0U;
+                g_i3cSlaveTxReadyDebug.reqReadFallbackTxSize = g_txSize;
+                g_i3cSlaveTxReadyDebug.reqReadFallbackIbiRequestSent = g_slaveIbiRequestSent ? 1U : 0U;
+            }
+            if (postRequestLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.postRequestTxDataSizeAfterCallback = handle->transfer.txDataSize;
+                g_i3cSlaveTxReadyDebug.postRequestTxDataNullAfterCallback =
+                    (handle->transfer.txData == NULL) ? 1U : 0U;
+            }
+            if (postMatchLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.postMatchTxDataSizeAfterWrite = handle->transfer.txDataSize;
+            }
+            if (postIbiReqReadLatchArmed)
+            {
+                g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataSizeAfterCallback = handle->transfer.txDataSize;
+                g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataNullAfterCallback =
+                    (handle->transfer.txData == NULL) ? 1U : 0U;
+            }
+        }
     }
 
     if ((NULL == handle->transfer.txData) || (0UL == handle->transfer.txDataSize))
@@ -3773,10 +4172,28 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
         return;
     }
 
+    handle->wasTransmit = true;
+
     /* Transmit a byte. */
     while ((handle->transfer.txDataSize != 0UL) && ((stateParams->txCount) != 0U))
     {
         g_i3cSlaveTxReadyDebug.writesAttempted++;
+        if (reqReadLatchArmed)
+        {
+            g_i3cSlaveTxReadyDebug.reqReadWritesAttempted++;
+        }
+        if (postRequestLatchArmed)
+        {
+            g_i3cSlaveTxReadyDebug.postRequestWritesAttempted++;
+        }
+        if (postIbiReqReadLatchArmed)
+        {
+            g_i3cSlaveTxReadyDebug.postIbiReqReadWritesAttempted++;
+        }
+        if (postMatchLatchArmed)
+        {
+            g_i3cSlaveTxReadyDebug.postMatchWritesAttempted++;
+        }
         if (handle->transfer.txDataSize > 1UL)
         {
             base->SWDATAB = *handle->transfer.txData++;
@@ -3793,6 +4210,24 @@ static void I3C_SlaveTransferHandleTxReady(I3C_Type *base,
 
     g_i3cSlaveTxReadyDebug.transferredCountAfterWrite = handle->transferredCount;
     g_i3cSlaveTxReadyDebug.txDataSizeAfterWrite = handle->transfer.txDataSize;
+    if (reqReadLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.reqReadTransferredCountAfterWrite = handle->transferredCount;
+        g_i3cSlaveTxReadyDebug.reqReadTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
+    if (postRequestLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postRequestTransferredCountAfterWrite = handle->transferredCount;
+        g_i3cSlaveTxReadyDebug.postRequestTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
+    if (postMatchLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postMatchTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
+    if (postIbiReqReadLatchArmed)
+    {
+        g_i3cSlaveTxReadyDebug.postIbiReqReadTxDataSizeAfterWrite = handle->transfer.txDataSize;
+    }
 }
 
 static void I3C_SlaveTransferHandleRxReady(I3C_Type *base,
@@ -3874,7 +4309,7 @@ void I3C_SlaveTransferHandleIRQ(I3C_Type *base, void *intHandle)
 
     if (0UL != (stateParams.flags & (uint32_t)kI3C_SlaveMatchedFlag))
     {
-        I3C_SlaveTransferHandleMatched(base, handle, &handle->transfer, stateParams.flags);
+        I3C_SlaveTransferHandleMatched(base, handle, &handle->transfer, stateParams.flags, &stateParams.pendingInts);
     }
 
     /* Get fifo counts and compute room in tx fifo. */

@@ -29,6 +29,14 @@
 #define EXPERIMENT_SLAVE_IBI_DATA 0xA5U
 #endif
 
+#ifndef EXPERIMENT_SLAVE_MIN_ECHO_COUNT
+#define EXPERIMENT_SLAVE_MIN_ECHO_COUNT 0U
+#endif
+
+#ifndef EXPERIMENT_SKIP_SLAVE_BOOT_LED_TEST
+#define EXPERIMENT_SKIP_SLAVE_BOOT_LED_TEST 0
+#endif
+
 #define EXPERIMENT_SLAVE_BCR_IBI_REQUEST_CAPABLE (1U << 1)
 #define EXPERIMENT_SLAVE_BCR_IBI_PAYLOAD (1U << 2)
 
@@ -68,7 +76,7 @@ enum
 };
 
 #define SLAVE_RETAINED_TRACE_MAGIC 0x53545243U
-#define SLAVE_RETAINED_TRACE_VERSION 3U
+#define SLAVE_RETAINED_TRACE_VERSION 4U
 
 enum
 {
@@ -115,6 +123,15 @@ typedef struct slave_retained_trace
     uint32_t echoLastByte;
     uint32_t txFirstByte;
     uint32_t txLastByte;
+    uint32_t lastTransmitIbiIssued;
+    uint32_t lastTransmitIbiRequestSent;
+    uint32_t lastTransmitPostIbiAddressMatched;
+    uint32_t lastTransmitTxSizeBefore;
+    uint32_t lastTransmitGTxSize;
+    uint32_t lastTransmitPostEchoPrepared;
+    uint32_t lastTransmitFirstByte;
+    uint32_t lastTransmitTxSizeAfter;
+    uint32_t lastTransmitTxDataIsNull;
 } slave_retained_trace_t;
 
 #if APP_ENABLE_SEMIHOST
@@ -205,8 +222,11 @@ uint8_t g_deviceBuffSize = I3C_SLAVE_RX_DATA_LENGTH;
 volatile bool g_lastTransferWasReceive = false;
 __attribute__((section(".usb_ram"), used, aligned(4))) volatile slave_retained_trace_t g_slaveRetainedTrace;
 static volatile bool g_slaveIbiPending = false;
-static volatile bool g_slaveIbiIssued = false;
+static volatile bool g_slaveRearmAfterInvalidStart = false;
+static volatile uint32_t g_slaveInvalidStartRearmCount = 0U;
+volatile bool g_slaveIbiIssued = false;
 volatile bool g_slaveIbiRequestSent = false;
+volatile bool g_slavePostIbiAddressMatched = false;
 static volatile uint32_t g_slaveIbiDelayLoops = 0U;
 static uint8_t g_slaveIbiPayload[1] = {EXPERIMENT_SLAVE_IBI_DATA};
 static volatile bool g_slaveActivityLedActive = false;
@@ -339,6 +359,32 @@ static void i3c_slave_enable_retained_trace_ram(void)
 
     RESET_PeripheralReset(kUSBHS_SRAM_RST_SHIFT_RSTn);
     CLOCK_EnableClock(kCLOCK_UsbhsSram);
+}
+
+static void i3c_slave_rearm_after_invalid_start(uint32_t eventMask)
+{
+    g_slaveRearmAfterInvalidStart = false;
+    g_slaveInvalidStartRearmCount++;
+    g_slaveCompletionFlag = false;
+    g_lastTransferWasReceive = false;
+    g_slaveIbiPending = false;
+    g_slaveIbiIssued = false;
+    g_slaveIbiRequestSent = false;
+    g_slavePostIbiAddressMatched = false;
+    g_slaveIbiDelayLoops = 0U;
+    g_txBuff = g_slave_txBuff;
+    g_txSize = I3C_SLAVE_TX_DATA_LENGTH;
+
+    I3C_SlaveTransferAbort(EXAMPLE_SLAVE, &g_i3c_s_handle);
+    I3C_SlaveClearErrorStatusFlags(EXAMPLE_SLAVE, I3C_SlaveGetErrorStatusFlags(EXAMPLE_SLAVE));
+    I3C_SlaveClearStatusFlags(EXAMPLE_SLAVE, (uint32_t)kI3C_SlaveClearFlags);
+    EXAMPLE_SLAVE->SDATACTRL |= I3C_SDATACTRL_FLUSHTB_MASK | I3C_SDATACTRL_FLUSHFB_MASK;
+
+    (void)I3C_SlaveTransferNonBlocking(EXAMPLE_SLAVE, &g_i3c_s_handle, eventMask);
+#ifdef ENABLE_PRINTF
+    PRINTF("slave: rearmed after pre-DAA invalid start\r\n");
+#endif
+    semihost_write0("slave: rearmed after pre-DAA invalid start\n");
 }
 
 static void i3c_slave_record_trace(uint32_t type, const uint8_t *buffer, uint32_t count, uint32_t status)
@@ -505,7 +551,8 @@ static void i3c_slave_flush_trace(void)
 
 static void i3c_slave_buildTxBuff(uint8_t *regAddr, uint8_t **txBuff, uint32_t *txBuffSize)
 {
-    if ((regAddr != NULL) && (g_slave_rxBuff[0] == g_deviceAddress))
+    if ((regAddr != NULL) && (g_slave_rxBuff[0] == g_deviceAddress) && (g_deviceBuff != NULL) &&
+        (g_deviceBuffSize != 0U))
     {
         *txBuff = g_deviceBuff;
         *txBuffSize = g_deviceBuffSize;
@@ -525,24 +572,43 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
     switch ((uint32_t)xfer->event)
     {
         case kI3C_SlaveAddressMatchEvent:
-            if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount == 0U))
+            if (g_slaveIbiRequestSent)
             {
+                g_slavePostIbiAddressMatched = true;
                 g_slaveRetainedTrace.postIbiAddressMatchCount++;
-                g_lastTransferWasReceive = false;
-                i3c_slave_buildTxBuff(xfer->rxData, &xfer->txData, (uint32_t *)&xfer->txDataSize);
+                if ((xfer->txData == NULL) || (xfer->txDataSize == 0U))
+                {
+                    xfer->txData = g_txBuff;
+                    xfer->txDataSize = g_txSize;
+                }
                 g_slaveRetainedTrace.postIbiAddressMatchTxSize = (uint32_t)xfer->txDataSize;
-                g_slaveRetainedTrace.postEchoTxPreparedCount = (uint32_t)xfer->txDataSize;
-                i3c_slave_record_trace(kSlaveTraceTxPrepared, xfer->txData, (uint32_t)xfer->txDataSize, 0U);
+#ifdef ENABLE_PRINTF
+                PRINTF("slave: post-ibi address match txsize=%lu first=0x%02x\r\n",
+                       (unsigned long)xfer->txDataSize,
+                       ((xfer->txData != NULL) && (xfer->txDataSize != 0U)) ? xfer->txData[0] : 0U);
+#endif
             }
             break;
 
         case kI3C_SlaveTransmitEvent:
             g_lastTransferWasReceive = false;
+            g_slaveRetainedTrace.lastTransmitIbiIssued = g_slaveIbiIssued ? 1U : 0U;
+            g_slaveRetainedTrace.lastTransmitIbiRequestSent = g_slaveIbiRequestSent ? 1U : 0U;
+            g_slaveRetainedTrace.lastTransmitPostIbiAddressMatched = g_slavePostIbiAddressMatched ? 1U : 0U;
+            g_slaveRetainedTrace.lastTransmitTxSizeBefore = (uint32_t)xfer->txDataSize;
+            g_slaveRetainedTrace.lastTransmitGTxSize = g_txSize;
+            g_slaveRetainedTrace.lastTransmitPostEchoPrepared = g_slaveRetainedTrace.postEchoTxPreparedCount;
+            g_slaveRetainedTrace.lastTransmitFirstByte =
+                ((g_txBuff != NULL) && (g_txSize != 0U)) ? g_txBuff[0] : 0xEEU;
+            g_slaveRetainedTrace.lastTransmitTxSizeAfter = 0U;
+            g_slaveRetainedTrace.lastTransmitTxDataIsNull = 1U;
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-            if (g_slaveIbiIssued && !g_slaveIbiRequestSent)
+            if (g_slaveIbiIssued && !g_slaveIbiRequestSent && !g_slavePostIbiAddressMatched)
             {
                 /* While the IBI request is still being sent, keep the normal
                  * post-echo data buffer out of the generic transmit path.
+                 * Once the post-IBI read has address-matched, the real
+                 * RequiredRead path needs the echo buffer immediately.
                  */
                 xfer->txData = NULL;
                 xfer->txDataSize = 0U;
@@ -550,6 +616,14 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             }
 #endif
             i3c_slave_buildTxBuff(xfer->rxData, &xfer->txData, (uint32_t *)&xfer->txDataSize);
+#ifdef ENABLE_PRINTF
+            if (g_slaveIbiRequestSent || g_slavePostIbiAddressMatched)
+            {
+                PRINTF("slave: transmit event post-ibi txsize=%lu first=0x%02x\r\n",
+                       (unsigned long)xfer->txDataSize,
+                       ((xfer->txData != NULL) && (xfer->txDataSize != 0U)) ? xfer->txData[0] : 0U);
+            }
+#endif
             if (g_slaveRetainedTrace.txPreparedCount == 0U)
             {
                 g_slaveRetainedTrace.txPreparedCount = (uint32_t)xfer->txDataSize;
@@ -559,6 +633,8 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             {
                 g_slaveRetainedTrace.postEchoTxPreparedCount = (uint32_t)xfer->txDataSize;
             }
+            g_slaveRetainedTrace.lastTransmitTxSizeAfter = (uint32_t)xfer->txDataSize;
+            g_slaveRetainedTrace.lastTransmitTxDataIsNull = (xfer->txData == NULL) ? 1U : 0U;
             i3c_slave_record_trace(kSlaveTraceTxPrepared, xfer->txData, (uint32_t)xfer->txDataSize, 0U);
             break;
 
@@ -571,6 +647,12 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
 
         case kI3C_SlaveStartEvent:
             i3c_slave_begin_activity_led();
+            break;
+
+        case kI3C_SlaveReceivedCCCEvent:
+#ifdef ENABLE_PRINTF
+            PRINTF("slave: CCC event flags=0x%08lx\r\n", (unsigned long)I3C_SlaveGetStatusFlags(base));
+#endif
             break;
 
         case (kI3C_SlaveTransmitEvent | kI3C_SlaveHDRCommandMatchEvent):
@@ -601,27 +683,31 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     }
 #endif
 
+                    if ((EXPERIMENT_SLAVE_MIN_ECHO_COUNT != 0U) && (echoedCount < EXPERIMENT_SLAVE_MIN_ECHO_COUNT))
+                    {
+                        echoedCount = EXPERIMENT_SLAVE_MIN_ECHO_COUNT;
+                    }
+
                     i3c_slave_record_trace(
                         kSlaveTraceRxComplete, g_slave_rxBuff, (uint32_t)xfer->transferredCount, 0U);
                     g_txBuff = g_slave_rxBuff;
                     g_txSize = echoedCount;
                     i3c_slave_record_trace(kSlaveTraceEchoArmed, g_txBuff, g_txSize, 0U);
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-                    g_slaveIbiPending = true;
-                    g_slaveIbiRequestSent = false;
-                    g_slaveIbiDelayLoops = I3C_SLAVE_IBI_POST_STOP_DELAY_LOOPS;
-                    i3c_slave_record_trace(kSlaveTraceIbiQueued, NULL, g_slaveRetainedTrace.ibiQueuedCount + 1U, 0U);
+                    if (!g_slaveIbiRequestSent)
+                    {
+                        g_slaveIbiPending = true;
+                        g_slaveIbiRequestSent = false;
+                        g_slavePostIbiAddressMatched = false;
+                        g_slaveIbiDelayLoops = I3C_SLAVE_IBI_POST_STOP_DELAY_LOOPS;
+                        i3c_slave_record_trace(
+                            kSlaveTraceIbiQueued, NULL, g_slaveRetainedTrace.ibiQueuedCount + 1U, 0U);
+                    }
 #endif
                 }
                 else
                 {
                     i3c_slave_record_trace(kSlaveTraceTxComplete, g_txBuff, (uint32_t)xfer->transferredCount, 0U);
-#if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-                    if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount != 0U))
-                    {
-                        g_slaveIbiRequestSent = false;
-                    }
-#endif
                     if (((g_slaveRetainedTrace.eventFlags & kSlaveRetainedTraceEchoArmedSeen) != 0U) &&
                         (g_slaveRetainedTrace.postEchoTxCompletionCount == 0U))
                     {
@@ -632,13 +718,30 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
             }
             else
             {
-                i3c_slave_fail_activity_led();
                 if ((g_slaveRetainedTrace.eventFlags & kSlaveRetainedTraceErrorSeen) == 0U)
                 {
                     g_slaveRetainedTrace.completionErrorFlags = I3C_SlaveGetStatusFlags(base);
                     g_slaveRetainedTrace.completionErrorTransferredCount = (uint32_t)xfer->transferredCount;
                     g_slaveRetainedTrace.completionErrorWasReceive = g_lastTransferWasReceive ? 1U : 0U;
                 }
+                if ((xfer->completionStatus == kStatus_I3C_InvalidStart) &&
+                    ((EXAMPLE_SLAVE->SDYNADDR & I3C_SDYNADDR_DAVALID_MASK) == 0U))
+                {
+#ifdef ENABLE_PRINTF
+                    PRINTF("slave: invalid start before DAA status=%ld flags=0x%08lx\r\n",
+                           (long)xfer->completionStatus,
+                           (unsigned long)I3C_SlaveGetStatusFlags(base));
+#endif
+                    g_slaveRearmAfterInvalidStart = true;
+                    break;
+                }
+
+#ifdef ENABLE_PRINTF
+                PRINTF("slave: completion error status=%ld flags=0x%08lx\r\n",
+                       (long)xfer->completionStatus,
+                       (unsigned long)I3C_SlaveGetStatusFlags(base));
+#endif
+                i3c_slave_fail_activity_led();
                 if (((g_slaveRetainedTrace.eventFlags & kSlaveRetainedTraceEchoArmedSeen) != 0U) &&
                     (g_slaveRetainedTrace.postEchoCompletionErrorStatus == 0U))
                 {
@@ -646,12 +749,6 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
                     g_slaveRetainedTrace.postEchoCompletionErrorFlags = I3C_SlaveGetStatusFlags(base);
                     g_slaveRetainedTrace.postEchoCompletionErrorWasReceive = g_lastTransferWasReceive ? 1U : 0U;
                 }
-#if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
-                if (g_slaveIbiRequestSent && (g_slaveRetainedTrace.postEchoTxPreparedCount != 0U))
-                {
-                    g_slaveIbiRequestSent = false;
-                }
-#endif
                 i3c_slave_record_trace(
                     kSlaveTraceCompletionError, NULL, I3C_SlaveGetStatusFlags(base), (uint32_t)xfer->completionStatus);
             }
@@ -659,10 +756,14 @@ static void i3c_slave_callback(I3C_Type *base, i3c_slave_transfer_t *xfer, void 
 
         case kI3C_SlaveRequestSentEvent:
             g_slaveIbiRequestSent = true;
+            g_slavePostIbiAddressMatched = false;
             i3c_slave_record_trace(kSlaveTraceIbiRequestSent,
                                    NULL,
                                    g_slaveRetainedTrace.ibiRequestSentCount + 1U,
                                    I3C_SlaveGetStatusFlags(base));
+#ifdef ENABLE_PRINTF
+            PRINTF("slave: ibi request sent status=0x%08lx\r\n", (unsigned long)I3C_SlaveGetStatusFlags(base));
+#endif
             break;
 
 #if defined(I3C_ASYNC_WAKE_UP_INTR_CLEAR)
@@ -688,7 +789,6 @@ int main(void)
     BOARD_InitBootPins();
     BOARD_BootClockRUN();
     i3c_slave_init_activity_led();
-    i3c_slave_run_boot_led_self_test();
 
     i3c_slave_enable_retained_trace_ram();
     i3c_slave_reset_retained_trace();
@@ -724,6 +824,8 @@ int main(void)
     slaveConfig.offline = false;
 
     I3C_SlaveInit(EXAMPLE_SLAVE, &slaveConfig, I3C_SLAVE_CLOCK_FREQUENCY);
+    I3C_SlaveSetWatermarks(
+        EXAMPLE_SLAVE, kI3C_TxTriggerUntilOneLessThanFull, kI3C_RxTriggerOnNotEmpty, true, true);
     semihost_write0("slave: i3c slave init done\n");
 
     eventMask = kI3C_SlaveAllEvents;
@@ -738,12 +840,26 @@ int main(void)
     g_slaveIbiRequestSent = false;
     g_slaveIbiDelayLoops = 0U;
     I3C_SlaveTransferNonBlocking(EXAMPLE_SLAVE, &g_i3c_s_handle, eventMask);
+#ifdef ENABLE_PRINTF
+    PRINTF("slave: armed\r\n");
+    PRINTF("slave: waiting for master traffic\r\n");
+#endif
+    semihost_write0("slave: armed\n");
     semihost_write0("slave: waiting for master traffic\n");
+
+#if !EXPERIMENT_SKIP_SLAVE_BOOT_LED_TEST
+    i3c_slave_run_boot_led_self_test();
+#endif
 
     while (1)
     {
         i3c_slave_service_activity_led();
         i3c_slave_flush_trace();
+
+        if (g_slaveRearmAfterInvalidStart)
+        {
+            i3c_slave_rearm_after_invalid_start(eventMask);
+        }
 
 #if EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX
         if (g_slaveIbiPending && !g_slaveIbiIssued)
@@ -773,6 +889,9 @@ int main(void)
             dynamicAddrReported = true;
             g_slaveRetainedTrace.eventFlags |= kSlaveRetainedTraceDynamicAddrSeen;
             g_slaveRetainedTrace.dynamicAddrReg = dynamicAddrReg;
+#ifdef ENABLE_PRINTF
+            PRINTF("slave: dynamic addr reg=0x%08lx\r\n", (unsigned long)dynamicAddrReg);
+#endif
             semihost_write_label_hex32("slave: dynamic addr reg=", dynamicAddrReg);
         }
 
