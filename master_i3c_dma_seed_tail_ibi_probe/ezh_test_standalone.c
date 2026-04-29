@@ -59,7 +59,6 @@
 #error "Unsupported EXPERIMENT_POST_IBI_READ_MODE"
 #endif
 
-#define I3C_DMA_SEED_TAIL_IBI_PAYLOAD_BYTE 0xA5U
 #define I3C_DMA_SEED_TAIL_IBI_MAX_PAYLOAD 8U
 #define I3C_BROADCAST_ADDR 0x7EU
 #define I3C_CCC_RSTDAA 0x06U
@@ -814,6 +813,14 @@ static status_t wait_for_roundtrip_read_completion(void)
     }
 
     return (status_t)s_roundtrip_read_status;
+}
+
+static uint8_t expected_post_rx_ibi_payload_byte(void)
+{
+    /* The shared slave implementation overwrites the IBI byte with the echoed
+     * RX count before it requests the interrupt.
+     */
+    return (uint8_t)I3C_DMA_SEED_CHAIN_LENGTH;
 }
 
 static void capture_failure_snapshot(I3C_Type *base)
@@ -1845,9 +1852,11 @@ int main(void)
         return -1;
     }
 
-    if (s_ibi_payload[0] != I3C_DMA_SEED_TAIL_IBI_PAYLOAD_BYTE)
+    if (s_ibi_payload[0] != expected_post_rx_ibi_payload_byte())
     {
-        EXP_LOG_ERROR("Unexpected IBI payload byte: 0x%02x", s_ibi_payload[0]);
+        EXP_LOG_ERROR("Unexpected IBI payload byte: expected=0x%02x actual=0x%02x",
+                      expected_post_rx_ibi_payload_byte(),
+                      s_ibi_payload[0]);
         dump_debug_state(EXAMPLE_MASTER);
         set_failure_led();
         return -1;
