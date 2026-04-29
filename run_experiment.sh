@@ -94,11 +94,34 @@ BUILD_DIR="$EXPERIMENT_DIR/_build"
 MASTER_BUILD_DIR="$BUILD_DIR/master"
 SLAVE_BUILD_DIR="$BUILD_DIR/slave"
 
-LINKSERVER=${LINKSERVER_BIN:-$REPO_DIR/.local/linkserver/extracted/flatten_LinkServer_25.12.83.pkg/Payload/dist/LinkServer}
-TOOLCHAIN_ROOT=${RT595_TOOLCHAIN_ROOT:-$REPO_DIR/.local/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi}
-CC=${RT595_CC:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-gcc}
-OBJCOPY=${RT595_OBJCOPY:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-objcopy}
-GDBBIN=${RT595_GDB:-$TOOLCHAIN_ROOT/bin/arm-none-eabi-gdb}
+default_linkserver_bin() {
+  local repo_local=$REPO_DIR/.local/linkserver/extracted/flatten_LinkServer_25.12.83.pkg/Payload/dist/LinkServer
+
+  if [[ -x "$repo_local" ]]; then
+    printf '%s\n' "$repo_local"
+    return 0
+  fi
+
+  command -v LinkServer 2>/dev/null || true
+}
+
+default_tool_binary() {
+  local binary_name=$1
+  local repo_root=${RT595_TOOLCHAIN_ROOT:-$REPO_DIR/.local/toolchains/arm-gnu-toolchain-15.2.rel1-darwin-arm64-arm-none-eabi}
+  local repo_binary=$repo_root/bin/$binary_name
+
+  if [[ -x "$repo_binary" ]]; then
+    printf '%s\n' "$repo_binary"
+    return 0
+  fi
+
+  command -v "$binary_name" 2>/dev/null || true
+}
+
+LINKSERVER=${LINKSERVER_BIN:-$(default_linkserver_bin)}
+CC=${RT595_CC:-$(default_tool_binary arm-none-eabi-gcc)}
+OBJCOPY=${RT595_OBJCOPY:-$(default_tool_binary arm-none-eabi-objcopy)}
+GDBBIN=${RT595_GDB:-$(default_tool_binary arm-none-eabi-gdb)}
 DEVICE=${RT595_DEVICE:-MIMXRT595S:EVK-MIMXRT595}
 MASTER_PROBE=${RT595_MASTER_PROBE:-${RT595_PROBE:-PRASAQKQ}}
 SLAVE_PROBE=${RT595_SLAVE_PROBE:-GRA1CQLQ}
@@ -115,6 +138,16 @@ SLAVE_ATTACH_GDB_PORT=${RT595_SLAVE_ATTACH_GDB_PORT:-3337}
 SLAVE_LINKSERVER_MODE=${RT595_SLAVE_LINKSERVER_MODE:-serial:/dev/cu.usbmodem${SLAVE_PROBE}2:115200}
 SLAVE_POST_MASTER_WAIT=${RT595_SLAVE_POST_MASTER_WAIT:-1}
 MASTER_RUN_MODE=${RT595_MASTER_RUN_MODE:-linkserver}
+
+if [[ -z "$CC" || -z "$OBJCOPY" || -z "$GDBBIN" ]]; then
+  echo "Arm GNU toolchain not found. Set RT595_TOOLCHAIN_ROOT or RT595_CC/RT595_OBJCOPY/RT595_GDB." >&2
+  exit 1
+fi
+
+if [[ "$MASTER_RUN_MODE" == linkserver && -z "$LINKSERVER" ]]; then
+  echo "LinkServer not found. Set LINKSERVER_BIN or install LinkServer in PATH." >&2
+  exit 1
+fi
 
 case "$MASTER_RUN_MODE" in
   linkserver|trace32|none)

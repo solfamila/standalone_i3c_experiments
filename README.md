@@ -14,8 +14,9 @@
   master linker script, so the master is linked for RAM execution.
 - `sdk/slave/evkmimxrt595_ezhb_Debug.ld` is the default slave linker script,
   so the slave is linked for flash, flashed, and run from flash.
-- `.local/` is the local default location for the Arm GNU toolchain and
-  LinkServer binaries used by the runner. It is ignored by git.
+- `.local/` can still hold local caches such as a private toolchain install,
+  LinkServer unpacking, and flash-state stamps, but the passing sweep source,
+  runner settings, and TRACE32 validation scripts are now versioned in this repo.
 - `Makefile` is the primary entry point for the common workflows.
 - `run_experiment.sh` is the backend used by the Makefile targets. It keeps the
   compile, flash, log-watch, timeout, and process-cleanup flow in one place.
@@ -36,11 +37,39 @@
   `.local/linkserver/extracted/flatten_LinkServer_25.12.83.pkg/Payload/dist/LinkServer`.
 - Two powered EVK-MIMXRT595 boards with accessible debug probes: one for the
   master image and one for the slave image.
-- By default the runner uses a local toolchain and LinkServer under `.local/`
-  inside this repository. You can override those paths with `LINKSERVER_BIN`
-  and `RT595_TOOLCHAIN_ROOT`.
+- The runner first honors `RT595_CC`, `RT595_OBJCOPY`, `RT595_GDB`,
+  `RT595_TOOLCHAIN_ROOT`, and `LINKSERVER_BIN`. If those are unset, it falls
+  back to the repo-local `.local/` install and then to the host `PATH`.
 - The repo already vendors the linker scripts and RT595 SDK payloads needed by
   the build, so no files outside this folder are required.
+
+## Passing Sweep Reproduction
+
+The validated passing checkpoint for `master_i3c_sdma_seed_tail_len_sweep`
+includes the experiment source, the shared-driver wiring in `run_experiment.sh`,
+and the TRACE32 settle scripts under `trace32/`.
+
+Validated build/run settings:
+
+- `RT595_MASTER_RUN_MODE=none`
+- `RT595_SLAVE_LIVE_RUN=1`
+- Arm GNU Toolchain `15.2.Rel1`
+- LinkServer `25.12.83`
+
+Validated reproduction flow:
+
+```bash
+cd standalone_i3c_experiments
+RT595_MASTER_RUN_MODE=none RT595_SLAVE_LIVE_RUN=1 ./run_experiment.sh master_i3c_sdma_seed_tail_len_sweep
+TRACE32_WRAPPER=/path/to/t32cmd_nostop ./trace32/run_master_i3c_sdma_seed_tail_len_sweep_long_settle.sh
+```
+
+If `t32cmd_nostop` is already on your `PATH`, you can omit `TRACE32_WRAPPER`.
+
+Passing settle signature:
+
+- `longRun= pc=20281C10 logical=100 chunk=8 lenSweepStage=5 dmaStage=0B dmaResult=0 roundStage=5 roundResult=0 ibiCount=1 chunkValidateReason=0`
+- `0x20281C10` resolves to `set_success_led`
 
 ## Experiment Differences
 

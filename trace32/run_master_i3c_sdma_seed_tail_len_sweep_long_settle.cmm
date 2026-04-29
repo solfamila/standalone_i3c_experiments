@@ -1,0 +1,27 @@
+DO "/Users/foxy/Downloads/tts/standalone_i3c_experiments/trace32/load_master_i3c_sdma_seed_tail_len_sweep.cmm"
+
+Break.Delete
+Break.Set set_success_led /Program
+Break.Set set_failure_led /Program
+
+Go
+WAIT !STATE.RUN() 180.s
+IF STATE.RUN()
+(
+  Break
+  WAIT !STATE.RUN() 1.s
+)
+
+PRINT "longRun=" \
+  " pc=" %HEX Register(PC) \
+  " logical=" %HEX Var.VALUE(s_length_sweep_probe_logical) \
+  " chunk=" %HEX Var.VALUE(s_length_sweep_probe_chunk) \
+  " lenSweepStage=" %HEX Var.VALUE(s_length_sweep_probe_stage) \
+  " dmaStage=" %HEX Var.VALUE(s_dma_probe_stage) \
+  " dmaResult=" %HEX Var.VALUE(s_dma_probe_result) \
+  " roundStage=" %HEX Var.VALUE(s_roundtrip_read_snapshot.stage) \
+  " roundResult=" %HEX Var.VALUE(s_roundtrip_read_snapshot.result) \
+  " ibiCount=" %HEX Var.VALUE(s_ibi_payload_count) \
+  " chunkValidateReason=" %HEX Var.VALUE(s_chunk_validate_reason)
+
+ENDDO
