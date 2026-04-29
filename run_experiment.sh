@@ -405,6 +405,7 @@ compile_master() {
   local master_app_source="$LOCAL_MASTER_DIR/ezh_test_standalone.c"
   local master_features_source="$LOCAL_MASTER_DIR/ezh_features_standalone.c"
   local master_driver_source="$LOCAL_MASTER_DIR/fsl_i3c_smartdma.c"
+  local shared_master_driver_include="$SCRIPT_DIR/../src/master/drivers"
   local src
   local rel
   local obj
@@ -446,6 +447,10 @@ compile_master() {
 
   if [[ "$EXPERIMENT_NAME" == "master_i3c_dma_seed_tail_ibi_probe" || "$EXPERIMENT_NAME" == "master_i3c_sdma_seed_tail_len_sweep" || "$EXPERIMENT_NAME" == "master_interrupt" ]]; then
     master_driver_source="$SCRIPT_DIR/../src/master/drivers/fsl_i3c_smartdma.c"
+    includes=(
+      "$shared_master_driver_include"
+      "${includes[@]}"
+    )
     defines+=(EXPERIMENT_SLAVE_REQUEST_IBI_AFTER_RX=1 EXPERIMENT_SLAVE_IBI_DATA=0xA5)
   fi
 
